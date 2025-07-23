@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Image to PDF Converter</title>
+    <title>Image to PDF Converter (HEIC Support)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
         body {
@@ -31,8 +31,41 @@
         .subtitle {
             text-align: center;
             color: #666;
-            margin-bottom: 40px;
+            margin-bottom: 30px;
             font-size: 1.1em;
+        }
+        .heic-notice {
+            background: linear-gradient(45deg, #e3f2fd, #f3e5f5);
+            border: 2px solid #2196f3;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .heic-notice h3 {
+            color: #1976d2;
+            margin-bottom: 10px;
+            font-size: 1.3em;
+        }
+        .heic-notice p {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .api-status {
+            display: inline-flex;
+            align-items: center;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+        .api-online {
+            background: #d4edda;
+            color: #155724;
+        }
+        .api-offline {
+            background: #f8d7da;
+            color: #721c24;
         }
         .upload-area {
             border: 3px dashed #007bff;
@@ -144,6 +177,7 @@
             overflow: hidden;
             box-shadow: 0 4px 15px rgba(0,0,0,0.1);
             transition: transform 0.3s ease;
+            position: relative;
         }
         .preview-item:hover {
             transform: translateY(-5px);
@@ -165,6 +199,41 @@
             color: #333;
             margin-bottom: 5px;
             word-break: break-word;
+        }
+        .file-type-badge {
+            display: inline-block;
+            background: #007bff;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-right: 5px;
+        }
+        .heic-badge {
+            background: #ff6b35;
+        }
+        .conversion-status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-converting {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status-converted {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
         }
         .remove-btn {
             background: #dc3545;
@@ -222,6 +291,20 @@
             color: #666;
             font-size: 0.9em;
         }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
         @keyframes pulse {
             0% { transform: scale(1); }
             50% { transform: scale(1.05); }
@@ -232,7 +315,17 @@
 <body>
     <div class="container">
         <h1>🖼️ Image to PDF</h1>
-        <p class="subtitle">Convert multiple images into a single PDF document</p>
+        <p class="subtitle">Convert multiple images (including HEIC) into a single PDF document</p>
+        
+        <div class="heic-notice">
+            <h3>📱 iPhone HEIC Support</h3>
+            <p>This tool now supports HEIC images from your iPhone! HEIC files will be automatically converted to JPG before PDF creation.</p>
+            <div>
+                <span class="api-status" id="apiStatus">
+                    <span class="spinner"></span> Checking HEIC converter...
+                </span>
+            </div>
+        </div>
         
         <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📸</div>
@@ -240,9 +333,9 @@
             <button class="upload-btn" type="button">
                 📁 Choose Images
             </button>
-            <input type="file" id="fileInput" multiple accept="image/*">
+            <input type="file" id="fileInput" multiple accept="image/*,.heic,.HEIC">
             <p style="font-size: 14px; color: #666; margin-top: 15px;">
-                Supports JPG, PNG, GIF, WebP, BMP formats • Multiple files supported
+                Supports JPG, PNG, GIF, WebP, BMP, <strong>HEIC</strong> formats • Multiple files supported
             </p>
         </div>
 
@@ -263,6 +356,10 @@
                 <div class="stat-label">Images</div>
             </div>
             <div class="stat">
+                <div class="stat-number" id="heicCount">0</div>
+                <div class="stat-label">HEIC Files</div>
+            </div>
+            <div class="stat">
                 <div class="stat-number" id="totalSize">0</div>
                 <div class="stat-label">Total Size</div>
             </div>
@@ -279,6 +376,10 @@
 
     <script>
         let selectedFiles = [];
+        let convertedImages = new Map(); // Store converted HEIC images
+        
+        // Configuration for HEIC conversion API
+        const HEIC_API_ENDPOINT = 'https://heic-pdf-converter-yashtejwani00-yashtejwani00s-projects.vercel.app'; // Replace with your API endpoint
         
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
@@ -288,7 +389,32 @@
         const filenameInput = document.getElementById('filenameInput');
         const stats = document.getElementById('stats');
         const imageCount = document.getElementById('imageCount');
+        const heicCount = document.getElementById('heicCount');
         const totalSize = document.getElementById('totalSize');
+        const apiStatus = document.getElementById('apiStatus');
+        
+        // Check HEIC API status on load
+        checkApiStatus();
+        
+        async function checkApiStatus() {
+            try {
+                const response = await fetch(`${HEIC_API_ENDPOINT}/status`, {
+                    method: 'GET',
+                    timeout: 5000
+                });
+                
+                if (response.ok) {
+                    apiStatus.innerHTML = '✅ HEIC Converter Online';
+                    apiStatus.className = 'api-status api-online';
+                } else {
+                    throw new Error('API not responding');
+                }
+            } catch (error) {
+                apiStatus.innerHTML = '❌ HEIC Converter Offline';
+                apiStatus.className = 'api-status api-offline';
+                console.warn('HEIC API unavailable:', error);
+            }
+        }
         
         // Drag and drop functionality
         uploadArea.addEventListener('dragover', (e) => {
@@ -311,8 +437,16 @@
             handleFiles(e.target.files);
         });
         
-        function handleFiles(files) {
-            const imageFiles = Array.from(files).filter(file => file.type.startsWith('image/'));
+        function isHeicFile(file) {
+            return file.type === 'image/heic' || 
+                   file.name.toLowerCase().endsWith('.heic') ||
+                   file.name.toLowerCase().endsWith('.heif');
+        }
+        
+        async function handleFiles(files) {
+            const imageFiles = Array.from(files).filter(file => 
+                file.type.startsWith('image/') || isHeicFile(file)
+            );
             
             if (imageFiles.length === 0) {
                 showStatus('⚠️ Please select valid image files', 'error');
@@ -322,6 +456,12 @@
             // Add new files to existing selection
             selectedFiles = [...selectedFiles, ...imageFiles];
             
+            // Convert HEIC files immediately
+            const heicFiles = selectedFiles.filter(isHeicFile);
+            if (heicFiles.length > 0) {
+                await convertHeicFiles(heicFiles);
+            }
+            
             displayPreview();
             updateStats();
             convertBtn.disabled = selectedFiles.length === 0;
@@ -329,30 +469,127 @@
             showStatus(`✅ ${selectedFiles.length} image(s) ready to convert`, 'success');
         }
         
+        async function convertHeicFiles(heicFiles) {
+            for (const file of heicFiles) {
+                if (convertedImages.has(file.name)) continue; // Skip if already converted
+                
+                try {
+                    showFileConversionStatus(file.name, 'converting');
+                    
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('quality', 90);
+                    
+                    const response = await fetch(`${HEIC_API_ENDPOINT}/convert`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`Conversion failed: ${response.statusText}`);
+                    }
+                    
+                    const result = await response.json();
+                    
+                    // Convert base64 to blob
+                    const jpegBlob = base64ToBlob(result.file, 'image/jpeg');
+                    
+                    // Store converted image
+                    convertedImages.set(file.name, {
+                        blob: jpegBlob,
+                        dataUrl: `data:image/jpeg;base64,${result.file}`,
+                        originalSize: file.size,
+                        convertedSize: jpegBlob.size
+                    });
+                    
+                    showFileConversionStatus(file.name, 'converted');
+                    
+                } catch (error) {
+                    console.error(`Failed to convert ${file.name}:`, error);
+                    showFileConversionStatus(file.name, 'error');
+                    
+                    // Fallback: Remove HEIC file from selection if conversion fails
+                    selectedFiles = selectedFiles.filter(f => f.name !== file.name);
+                }
+            }
+        }
+        
+        function base64ToBlob(base64, mimeType) {
+            const bytes = atob(base64);
+            const byteNumbers = new Array(bytes.length);
+            for (let i = 0; i < bytes.length; i++) {
+                byteNumbers[i] = bytes.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            return new Blob([byteArray], { type: mimeType });
+        }
+        
+        function showFileConversionStatus(fileName, status) {
+            const fileElement = document.querySelector(`[data-filename="${fileName}"]`);
+            if (!fileElement) return;
+            
+            const statusElement = fileElement.querySelector('.conversion-status');
+            if (!statusElement) return;
+            
+            switch (status) {
+                case 'converting':
+                    statusElement.innerHTML = '<span class="spinner"></span>Converting...';
+                    statusElement.className = 'conversion-status status-converting';
+                    break;
+                case 'converted':
+                    statusElement.innerHTML = '✅ Converted';
+                    statusElement.className = 'conversion-status status-converted';
+                    break;
+                case 'error':
+                    statusElement.innerHTML = '❌ Failed';
+                    statusElement.className = 'conversion-status status-error';
+                    break;
+            }
+        }
+        
         function displayPreview() {
             preview.innerHTML = '';
             
             selectedFiles.forEach((file, index) => {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    const previewItem = document.createElement('div');
-                    previewItem.className = 'preview-item';
-                    previewItem.innerHTML = `
-                        <img src="${e.target.result}" alt="Image ${index + 1}">
-                        <div class="file-info">
-                            <div class="file-name">📄 ${file.name}</div>
-                            <div>📏 ${(file.size / 1024).toFixed(1)} KB</div>
-                            <div>📐 ${file.type.split('/')[1].toUpperCase()}</div>
-                            <button class="remove-btn" onclick="removeImage(${index})">❌ Remove</button>
+                const isHeic = isHeicFile(file);
+                const converted = convertedImages.get(file.name);
+                
+                const previewItem = document.createElement('div');
+                previewItem.className = 'preview-item';
+                previewItem.setAttribute('data-filename', file.name);
+                
+                // Use converted image if available, otherwise original
+                const imageSource = converted ? converted.dataUrl : URL.createObjectURL(file);
+                const fileSize = converted ? converted.convertedSize : file.size;
+                
+                previewItem.innerHTML = `
+                    ${isHeic ? '<div class="conversion-status">Pending...</div>' : ''}
+                    <img src="${imageSource}" alt="Image ${index + 1}">
+                    <div class="file-info">
+                        <div class="file-name">
+                            ${isHeic ? '<span class="file-type-badge heic-badge">HEIC</span>' : ''}
+                            📄 ${file.name}
                         </div>
-                    `;
-                    preview.appendChild(previewItem);
-                };
-                reader.readAsDataURL(file);
+                        <div>📏 ${(fileSize / 1024).toFixed(1)} KB</div>
+                        <div>📐 ${isHeic ? 'HEIC → JPG' : file.type.split('/')[1].toUpperCase()}</div>
+                        <button class="remove-btn" onclick="removeImage(${index})">❌ Remove</button>
+                    </div>
+                `;
+                preview.appendChild(previewItem);
+                
+                // If not converted and is HEIC, show pending status
+                if (isHeic && !converted) {
+                    showFileConversionStatus(file.name, 'converting');
+                }
             });
         }
         
         function removeImage(index) {
+            const file = selectedFiles[index];
+            
+            // Remove from converted images if exists
+            convertedImages.delete(file.name);
+            
             selectedFiles.splice(index, 1);
             displayPreview();
             updateStats();
@@ -375,7 +612,13 @@
             stats.style.display = 'flex';
             imageCount.textContent = selectedFiles.length;
             
-            const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+            const heicFileCount = selectedFiles.filter(isHeicFile).length;
+            heicCount.textContent = heicFileCount;
+            
+            const totalBytes = selectedFiles.reduce((sum, file) => {
+                const converted = convertedImages.get(file.name);
+                return sum + (converted ? converted.convertedSize : file.size);
+            }, 0);
             const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
             totalSize.textContent = totalMB + ' MB';
         }
@@ -389,6 +632,15 @@
         async function convertToPDF() {
             if (selectedFiles.length === 0) return;
             
+            // Check if all HEIC files are converted
+            const heicFiles = selectedFiles.filter(isHeicFile);
+            const unconvertedHeic = heicFiles.filter(file => !convertedImages.has(file.name));
+            
+            if (unconvertedHeic.length > 0) {
+                showStatus('⏳ Please wait for HEIC conversion to complete...', 'info');
+                return;
+            }
+            
             const filename = filenameInput.value.trim() || 'converted-images';
             
             showStatus('🔄 Converting images to PDF...', 'info');
@@ -400,7 +652,16 @@
                 
                 for (let i = 0; i < selectedFiles.length; i++) {
                     const file = selectedFiles[i];
-                    const imageData = await fileToBase64(file);
+                    const isHeic = isHeicFile(file);
+                    const converted = convertedImages.get(file.name);
+                    
+                    // Use converted image data or original file
+                    let imageData;
+                    if (isHeic && converted) {
+                        imageData = converted.dataUrl;
+                    } else {
+                        imageData = await fileToBase64(file);
+                    }
                     
                     showStatus(`🔄 Processing image ${i + 1} of ${selectedFiles.length}...`, 'info');
                     
@@ -458,14 +719,17 @@
                         URL.revokeObjectURL(downloadUrl);
                     }, 1000);
                     
+                    const heicProcessed = selectedFiles.filter(isHeicFile).length;
+                    const heicMessage = heicProcessed > 0 ? ` (${heicProcessed} HEIC files converted)` : '';
+                    
                     showStatus(`
-                        <div>✅ PDF created successfully!</div>
+                        <div>✅ PDF created successfully!${heicMessage}</div>
                         <div style="margin-top: 10px;">📁 <strong>${finalFilename}</strong> downloaded to your Downloads folder</div>
                         <div style="margin-top: 5px; font-size: 0.9em;">💡 Press Ctrl+J (Cmd+J on Mac) to view downloads</div>
                     `, 'success');
                     
                 } catch (error) {
-                    // If download fails (like in Claude iframe), provide manual download link
+                    // If download fails, provide manual download link
                     document.body.removeChild(downloadLink);
                     
                     const manualDownloadBtn = document.createElement('a');
