@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Chrome Dashboard",
+  "version": "1.0",
+  "description": "A techy homepage with real Chrome integration",
+  "permissions": [
+    "bookmarks",
+    "readingList",
+    "storage",
+    "tabs"
+  ],
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
+  }
+}
