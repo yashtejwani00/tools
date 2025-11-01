@@ -3,6 +3,11 @@ let bookmarksData = [];
 let customButtons = [];
 let readingListData = [];
 
+// Favorites navigation state
+let currentFolderId = null; // Currently displayed folder ID
+let currentFolderNode = null; // Full folder node object
+let bookmarksBarId = null; // Store bookmarks bar ID for quick access
+
 // Initialize extension
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Chrome Dashboard Extension loaded');
@@ -146,70 +151,160 @@ function updateTime() {
     timeDisplay.textContent = `${timeString} | ${dateString}`;
 }
 
-// Load favorites from Chrome bookmarks
-async function loadFavorites() {
+// Load favorites from Chrome bookmarks with folder navigation support
+async function loadFavorites(folderId = null) {
     try {
-        console.log('Loading favorites...');
+        console.log('Loading favorites...', folderId ? `Folder: ${folderId}` : 'Root');
         const bookmarks = await chrome.bookmarks.getTree();
         const favoritesGrid = document.getElementById('favoritesGrid');
-        
+
         if (!favoritesGrid) {
             console.error('Favorites grid element not found');
             return;
         }
-        
-        // More reliable bookmarks bar detection
-        const bookmarkBar = bookmarks[0].children.find(child => 
-            child.title === 'Bookmarks bar' || 
-            child.title === 'Bookmarks Bar' ||
-            child.folderType === 'bookmarks-bar'
-        );
-        
-        const favorites = bookmarkBar ? bookmarkBar.children.slice(0, 8) : [];
-        
-        if (favorites.length === 0) {
-            favoritesGrid.innerHTML = '<div class="loading">No bookmarks found in bookmarks bar</div>';
+
+        // Find bookmarks bar on first load
+        if (!bookmarksBarId) {
+            const bookmarkBar = bookmarks[0].children[1];
+
+            if (!bookmarkBar) {
+                favoritesGrid.innerHTML = '<div class="loading">Bookmarks bar not found</div>';
+                return;
+            }
+
+            bookmarksBarId = bookmarkBar.id;
+            currentFolderId = bookmarkBar.id;
+            currentFolderNode = bookmarkBar;
+        }
+
+        // If folderId provided, fetch that specific folder
+        if (folderId) {
+            try {
+                const folder = await chrome.bookmarks.getSubTree(folderId);
+                if (folder && folder[0]) {
+                    currentFolderId = folderId;
+                    currentFolderNode = folder[0];
+                }
+            } catch (error) {
+                console.error('Error loading folder:', error);
+                // Fall back to bookmarks bar
+                currentFolderId = bookmarksBarId;
+            }
+        }
+
+        // Get children of current folder
+        const children = currentFolderNode?.children || [];
+
+        // Render breadcrumb navigation
+        renderBreadcrumb();
+
+        // Clear grid
+        favoritesGrid.innerHTML = '';
+
+        // Show empty state if no items
+        if (children.length === 0) {
+            favoritesGrid.innerHTML = '<div class="loading">No bookmarks in this folder</div>';
             return;
         }
-        
-        favoritesGrid.innerHTML = '';
-        
-        favorites.forEach(bookmark => {
-            if (bookmark.url) {
-                const favoriteItem = createFavoriteItem(bookmark);
-                favoritesGrid.appendChild(favoriteItem);
+
+        // Render folders and bookmarks
+        children.forEach(item => {
+            if (item.children) {
+                // It's a folder
+                const folderElement = createFolderItem(item);
+                favoritesGrid.appendChild(folderElement);
+            } else if (item.url) {
+                // It's a bookmark
+                const bookmarkElement = createFavoriteItem(item);
+                favoritesGrid.appendChild(bookmarkElement);
             }
         });
-        
-        console.log(`Loaded ${favorites.length} favorites`);
+
+        console.log(`Loaded ${children.length} items (folders & bookmarks)`);
     } catch (error) {
         console.error('Error loading favorites:', error);
         const favoritesGrid = document.getElementById('favoritesGrid');
         if (favoritesGrid) {
-            favoritesGrid.innerHTML = '<div class="loading">Error loading favorites</div>';
+            favoritesGrid.innerHTML = '<div class="loading">Error loading favorites. Check permissions.</div>';
         }
     }
 }
 
-// Create favorite item element
+// Create favorite item element (for bookmarks)
 function createFavoriteItem(bookmark) {
     const item = document.createElement('div');
-    item.className = 'favorite-item';
+    item.className = 'favorite-item favorite-bookmark';
     item.addEventListener('click', () => openUrl(bookmark.url));
-    
+
+    // Try to use favicon, fall back to initials
     const icon = document.createElement('div');
     icon.className = 'favorite-icon';
-    icon.textContent = getInitials(bookmark.title);
-    
+
+    // Use Google favicon service or fall back to initials
+    const faviconUrl = getFaviconUrl(bookmark.url);
+    if (faviconUrl) {
+        const img = document.createElement('img');
+        img.src = faviconUrl;
+        img.alt = bookmark.title || 'Bookmark';
+        img.style.width = '100%';
+        img.style.height = '100%';
+        img.style.borderRadius = '8px';
+        // Fallback to initials if image fails to load
+        img.onerror = () => {
+            icon.innerHTML = '';
+            icon.textContent = getInitials(bookmark.title || bookmark.url);
+        };
+        icon.appendChild(img);
+    } else {
+        icon.textContent = getInitials(bookmark.title || bookmark.url);
+    }
+
     const title = document.createElement('div');
     title.className = 'favorite-title';
-    title.textContent = bookmark.title;
-    title.title = bookmark.title; // Tooltip
-    
+    title.textContent = bookmark.title || new URL(bookmark.url).hostname;
+    title.title = bookmark.url; // Tooltip shows URL
+
     item.appendChild(icon);
     item.appendChild(title);
-    
+
     return item;
+}
+
+// Create folder item element
+function createFolderItem(folder) {
+    const item = document.createElement('div');
+    item.className = 'favorite-item favorite-folder';
+    item.addEventListener('click', () => navigateToFolder(folder.id));
+
+    const icon = document.createElement('div');
+    icon.className = 'favorite-icon folder-icon';
+    // Use folder emoji/icon
+    icon.innerHTML = `
+        <svg viewBox="0 0 24 24" style="width: 24px; height: 24px; fill: #fbbf24;">
+            <path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2h-8l-2-2z"/>
+        </svg>
+    `;
+
+    const title = document.createElement('div');
+    title.className = 'favorite-title';
+    title.textContent = folder.title || 'Untitled Folder';
+    title.title = `Open folder: ${folder.title || 'Untitled Folder'}`;
+
+    item.appendChild(icon);
+    item.appendChild(title);
+
+    return item;
+}
+
+// Get favicon URL for a bookmark
+function getFaviconUrl(url) {
+    try {
+        const urlObj = new URL(url);
+        // Use Google's favicon service
+        return `https://www.google.com/s2/favicons?domain=${urlObj.hostname}&sz=32`;
+    } catch (error) {
+        return null;
+    }
 }
 
 // Get initials from title
@@ -220,6 +315,66 @@ function getInitials(title) {
         .join('')
         .substring(0, 2)
         .toUpperCase();
+}
+
+// Navigate to a specific folder
+async function navigateToFolder(folderId) {
+    await loadFavorites(folderId);
+}
+
+// Navigate back to parent folder
+async function navigateUp() {
+    if (!currentFolderNode || !currentFolderNode.parentId) {
+        // Already at top, reload bookmarks bar
+        await loadFavorites();
+        return;
+    }
+
+    // Navigate to parent folder
+    await loadFavorites(currentFolderNode.parentId);
+}
+
+// Render breadcrumb navigation
+async function renderBreadcrumb() {
+    const container = document.getElementById('breadcrumbNav');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    // Add home/root button
+    const homeBtn = document.createElement('button');
+    homeBtn.className = 'breadcrumb-btn breadcrumb-home';
+    homeBtn.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24">
+            <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+        </svg>
+    `;
+    homeBtn.title = 'Back to Bookmarks Bar';
+    homeBtn.addEventListener('click', () => loadFavorites());
+    container.appendChild(homeBtn);
+
+    // Add back button if not at root
+    if (currentFolderNode && currentFolderNode.id !== bookmarksBarId) {
+        const backBtn = document.createElement('button');
+        backBtn.className = 'breadcrumb-btn breadcrumb-back';
+        backBtn.innerHTML = `
+            <svg class="icon" viewBox="0 0 24 24">
+                <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+            </svg>
+            Back
+        `;
+        backBtn.title = 'Go back to parent folder';
+        backBtn.addEventListener('click', navigateUp);
+        container.appendChild(backBtn);
+
+        // Show current folder name
+        if (currentFolderNode.title) {
+            const folderName = document.createElement('span');
+            folderName.className = 'breadcrumb-current';
+            folderName.textContent = currentFolderNode.title;
+            container.appendChild(folderName);
+        }
+    }
 }
 
 // Open URL in new tab
