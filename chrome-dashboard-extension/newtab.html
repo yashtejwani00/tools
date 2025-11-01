@@ -46,7 +46,12 @@
                                 <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
                             </svg>
                         </button>
-                        <button class="add-favorite-btn" id="addFavorite" title="Add Favorite">
+                        <button class="add-folder-btn" id="addFolder" title="Create New Folder">
+                            <svg class="icon" viewBox="0 0 24 24">
+                                <path d="M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-1 8h-3v3h-2v-3h-3v-2h3V9h2v3h3v2z"/>
+                            </svg>
+                        </button>
+                        <button class="add-favorite-btn" id="addFavorite" title="Add Bookmark">
                             <svg class="icon" viewBox="0 0 24 24">
                                 <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
                             </svg>
@@ -203,6 +208,24 @@
             <div class="modal-buttons">
                 <button class="btn" id="cancelButton">Cancel</button>
                 <button class="btn" id="saveButton">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for creating new folder -->
+    <div class="modal" id="createFolderModal">
+        <div class="modal-content">
+            <h3>Create New Folder</h3>
+            <div class="form-group">
+                <label for="folderName">Folder Name:</label>
+                <input type="text" id="folderName" placeholder="Enter folder name" maxlength="255">
+            </div>
+            <div class="form-info">
+                <p>Folder will be created in: <strong id="folderLocation">Bookmarks Bar</strong></p>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn" id="cancelFolder">Cancel</button>
+                <button class="btn" id="saveFolder">Create Folder</button>
             </div>
         </div>
     </div>

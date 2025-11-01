@@ -46,7 +46,11 @@ function setupEventListeners() {
     // Add favorite
     const addFavBtn = document.getElementById('addFavorite');
     if (addFavBtn) addFavBtn.addEventListener('click', openAddFavoriteModal);
-    
+
+    // Add folder
+    const addFolderBtn = document.getElementById('addFolder');
+    if (addFolderBtn) addFolderBtn.addEventListener('click', openCreateFolderModal);
+
     // Toggle bookmarks
     const toggleBookmarksBtn = document.getElementById('toggleBookmarks');
     if (toggleBookmarksBtn) toggleBookmarksBtn.addEventListener('click', toggleBookmarks);
@@ -83,10 +87,17 @@ function setupEventListeners() {
     // Add favorite modal
     const cancelFavBtn = document.getElementById('cancelFavorite');
     if (cancelFavBtn) cancelFavBtn.addEventListener('click', closeFavoriteModal);
-    
+
     const saveFavBtn = document.getElementById('saveFavorite');
     if (saveFavBtn) saveFavBtn.addEventListener('click', saveFavorite);
-    
+
+    // Create folder modal
+    const cancelFolderBtn = document.getElementById('cancelFolder');
+    if (cancelFolderBtn) cancelFolderBtn.addEventListener('click', closeFolderModal);
+
+    const saveFolderBtn = document.getElementById('saveFolder');
+    if (saveFolderBtn) saveFolderBtn.addEventListener('click', createFolder);
+
     // Search bookmarks
     const searchInput = document.getElementById('bookmarkSearch');
     if (searchInput) searchInput.addEventListener('keyup', searchBookmarks);
@@ -110,6 +121,15 @@ function setupEventListeners() {
         favoriteModal.addEventListener('click', function(event) {
             if (event.target === this) {
                 closeFavoriteModal();
+            }
+        });
+    }
+
+    const folderModal = document.getElementById('createFolderModal');
+    if (folderModal) {
+        folderModal.addEventListener('click', function(event) {
+            if (event.target === this) {
+                closeFolderModal();
             }
         });
     }
@@ -350,7 +370,7 @@ async function renderBreadcrumb() {
         </svg>
     `;
     homeBtn.title = 'Back to Bookmarks Bar';
-    homeBtn.addEventListener('click', () => loadFavorites());
+    homeBtn.addEventListener('click', () => loadFavorites(bookmarksBarId));
     container.appendChild(homeBtn);
 
     // Add back button if not at root
@@ -783,15 +803,122 @@ function openAddFavoriteModal() {
 function closeFavoriteModal() {
     const modal = document.getElementById('addFavoriteModal');
     if (modal) modal.style.display = 'none';
-    
+
     // Clear form
     const titleInput = document.getElementById('favoriteTitle');
     const urlInput = document.getElementById('favoriteUrl');
     const positionSelect = document.getElementById('favoritePosition');
-    
+
     if (titleInput) titleInput.value = '';
     if (urlInput) urlInput.value = '';
     if (positionSelect) positionSelect.value = 'end';
+}
+
+// Create folder functionality
+function openCreateFolderModal() {
+    const modal = document.getElementById('createFolderModal');
+    const locationDisplay = document.getElementById('folderLocation');
+
+    if (!modal) return;
+
+    // Update location display to show where folder will be created
+    if (locationDisplay) {
+        if (currentFolderNode && currentFolderNode.title) {
+            locationDisplay.textContent = currentFolderNode.title;
+        } else {
+            locationDisplay.textContent = 'Bookmarks Bar';
+        }
+    }
+
+    // Focus on the input field
+    modal.style.display = 'block';
+    setTimeout(() => {
+        const folderNameInput = document.getElementById('folderName');
+        if (folderNameInput) folderNameInput.focus();
+    }, 100);
+}
+
+function closeFolderModal() {
+    const modal = document.getElementById('createFolderModal');
+    if (modal) modal.style.display = 'none';
+
+    // Clear form
+    const folderNameInput = document.getElementById('folderName');
+    if (folderNameInput) folderNameInput.value = '';
+}
+
+/**
+ * Creates a new folder in the current location
+ * Uses Chrome Bookmarks API to create a folder bookmark node
+ * Handles validation and error cases
+ */
+async function createFolder() {
+    const folderNameInput = document.getElementById('folderName');
+
+    if (!folderNameInput) {
+        alert('Form elements not found');
+        return;
+    }
+
+    const folderName = folderNameInput.value.trim();
+
+    // Validation: Check for empty folder name
+    if (!folderName) {
+        alert('Please enter a folder name');
+        folderNameInput.focus();
+        return;
+    }
+
+    // Validation: Check for reasonable length (Chrome limit is 255 chars)
+    if (folderName.length > 255) {
+        alert('Folder name is too long (maximum 255 characters)');
+        return;
+    }
+
+    try {
+        // Determine parent folder ID
+        // If we're viewing a specific folder, create inside it
+        // Otherwise, create in bookmarks bar
+        const parentId = currentFolderId || bookmarksBarId;
+
+        if (!parentId) {
+            alert('Cannot determine parent folder. Please refresh and try again.');
+            return;
+        }
+
+        console.log(`Creating folder "${folderName}" in parent: ${parentId}`);
+
+        // Create folder using Chrome Bookmarks API
+        // Note: Folders are created WITHOUT a 'url' field
+        const newFolder = await chrome.bookmarks.create({
+            parentId: parentId,
+            title: folderName
+            // No 'url' field = folder (not a bookmark)
+        });
+
+        console.log('Folder created successfully:', newFolder);
+
+        // Close modal
+        closeFolderModal();
+
+        // Refresh the favorites display to show the new folder
+        await loadFavorites(currentFolderId);
+
+        // Optional: Show success feedback
+        // You could add a toast notification here
+
+    } catch (error) {
+        console.error('Error creating folder:', error);
+
+        // Provide user-friendly error messages
+        if (error.message.includes('permission')) {
+            alert('Permission denied. Please check extension permissions.');
+        } else if (error.message.includes('not found')) {
+            alert('Parent folder not found. Please refresh and try again.');
+        } else {
+            alert(`Error creating folder: ${error.message}`);
+        }
+    }
 }
 
 async function saveFavorite() {
