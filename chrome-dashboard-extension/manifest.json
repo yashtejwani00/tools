@@ -9,6 +9,9 @@
     "storage",
     "tabs"
   ],
+  "host_permissions": [
+    "https://zineone.atlassian.net/*"
+  ],
   "chrome_url_overrides": {
     "newtab": "newtab.html"
   }

@@ -343,111 +343,27 @@ body {
     color: #a8dadc;
 }
 
-.expandable-btn {
-    justify-content: space-between;
-}
-
-.expand-icon {
-    width: 16px;
-    height: 16px;
-    transition: transform 0.3s ease;
-}
-
-.expandable-btn.expanded .expand-icon {
-    transform: rotate(180deg);
-}
-
-.expandable-content {
-    display: none;
-    margin-top: 1rem;
-    padding: 1rem;
+/* Jira Dashboard Styles */
+.jira-stats {
+    color: #94a3b8;
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+    padding: 0.5rem;
     background: rgba(45, 55, 72, 0.3);
-    border: 1px solid rgba(168, 218, 220, 0.2);
-    border-radius: 10px;
+    border-radius: 6px;
+    text-align: center;
+}
+
+.jira-content {
     max-height: 400px;
     overflow-y: auto;
-}
-
-.expandable-content.show {
-    display: block;
-    animation: slideDown 0.3s ease;
-}
-
-@keyframes slideDown {
-    from {
-        opacity: 0;
-        transform: translateY(-10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.content-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid rgba(168, 218, 220, 0.3);
-}
-
-.content-header h4 {
-    color: #a8dadc;
-    font-size: 1.1rem;
-}
-
-.search-box input {
-    background: rgba(45, 55, 72, 0.5);
-    border: 1px solid rgba(168, 218, 220, 0.3);
-    border-radius: 6px;
     padding: 0.5rem;
-    color: #e2e8f0;
-    font-size: 0.9rem;
-    width: 200px;
 }
 
-.search-box input:focus {
-    outline: none;
-    border-color: #a8dadc;
-    box-shadow: 0 0 10px rgba(168, 218, 220, 0.3);
-}
-
-.bookmark-folder, .bookmark-item {
+.jira-issue {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem;
-    margin: 0.25rem 0;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-}
-
-.bookmark-folder:hover, .bookmark-item:hover {
-    background: rgba(168, 218, 220, 0.15);
-}
-
-.bookmark-folder {
-    font-weight: 500;
-    color: #fbbf24;
-}
-
-.bookmark-item {
-    color: #e2e8f0;
-    padding-left: 1.5rem;
-}
-
-.bookmark-item .icon {
-    width: 16px;
-    height: 16px;
-}
-
-.reading-item {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
+    gap: 1rem;
     padding: 0.75rem;
     margin: 0.5rem 0;
     background: rgba(45, 55, 72, 0.4);
@@ -457,33 +373,100 @@ body {
     transition: all 0.2s ease;
 }
 
-.reading-item:hover {
+.jira-issue:hover {
     background: rgba(168, 218, 220, 0.15);
     transform: translateX(5px);
+    border-color: rgba(168, 218, 220, 0.4);
 }
 
-.reading-item-content {
+.jira-issue-key {
+    background: linear-gradient(45deg, #a8dadc, #81c4c8);
+    color: #1a1a2e;
+    padding: 0.3rem 0.75rem;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.jira-issue-content {
     flex: 1;
+    min-width: 0;
 }
 
-.reading-item-title {
+.jira-issue-title {
     font-weight: 500;
     color: #e2e8f0;
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.5rem;
     font-size: 0.9rem;
-}
-
-.reading-item-url {
-    color: #94a3b8;
-    font-size: 0.8rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.reading-list-stats {
-    color: #94a3b8;
+.jira-status-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.jira-status-new {
+    background: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.4);
+}
+
+.jira-status-indeterminate {
+    background: rgba(251, 191, 36, 0.2);
+    color: #fbbf24;
+    border: 1px solid rgba(251, 191, 36, 0.4);
+}
+
+.jira-status-done {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.jira-arrow {
+    width: 20px;
+    height: 20px;
+    fill: #94a3b8;
+    flex-shrink: 0;
+    transition: all 0.2s ease;
+}
+
+.jira-issue:hover .jira-arrow {
+    fill: #a8dadc;
+    transform: translateX(3px);
+}
+
+.jira-error {
+    text-align: center;
+    padding: 2rem;
+    color: #f87171;
+}
+
+.jira-error .icon {
+    width: 48px;
+    height: 48px;
+    fill: currentColor;
+    margin: 0 auto 1rem;
+}
+
+.jira-error-title {
+    font-weight: 600;
+    margin: 0.5rem 0;
+    font-size: 1rem;
+}
+
+.jira-error-message {
     font-size: 0.9rem;
+    color: #94a3b8;
+    margin-top: 0.5rem;
 }
 
 .add-button {

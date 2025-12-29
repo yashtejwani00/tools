@@ -2,6 +2,8 @@
 let bookmarksData = [];
 let customButtons = [];
 let readingListData = [];
+let jiraData = [];
+let jiraConfig = null;
 
 // Favorites navigation state
 let currentFolderId = null; // Currently displayed folder ID
@@ -18,6 +20,8 @@ document.addEventListener('DOMContentLoaded', function() {
     
     loadFavorites();
     loadCustomButtons();
+    loadJiraConfig();
+    loadJiraIssues();
     setupEventListeners();
 });
 
@@ -51,28 +55,9 @@ function setupEventListeners() {
     const addFolderBtn = document.getElementById('addFolder');
     if (addFolderBtn) addFolderBtn.addEventListener('click', openCreateFolderModal);
 
-    // Toggle bookmarks
-    const toggleBookmarksBtn = document.getElementById('toggleBookmarks');
-    if (toggleBookmarksBtn) toggleBookmarksBtn.addEventListener('click', toggleBookmarks);
-    
-    // Toggle reading list
-    const toggleReadingListBtn = document.getElementById('toggleReadingList');
-    if (toggleReadingListBtn) toggleReadingListBtn.addEventListener('click', toggleReadingList);
-    
-    // Open extensions/passwords
-    const openExtensionsBtn = document.getElementById('openExtensions');
-    if (openExtensionsBtn) {
-        openExtensionsBtn.addEventListener('click', () => {
-            chrome.tabs.create({ url: 'chrome://extensions/' });
-        });
-    }
-    
-    const openPasswordsBtn = document.getElementById('openPasswords');
-    if (openPasswordsBtn) {
-        openPasswordsBtn.addEventListener('click', () => {
-            chrome.tabs.create({ url: 'chrome://password-manager/' });
-        });
-    }
+    // Refresh Jira
+    const refreshJiraBtn = document.getElementById('refreshJira');
+    if (refreshJiraBtn) refreshJiraBtn.addEventListener('click', loadJiraIssues);
     
     // Custom button modal
     const addCustomBtn = document.getElementById('addCustomButton');
@@ -98,10 +83,6 @@ function setupEventListeners() {
     const saveFolderBtn = document.getElementById('saveFolder');
     if (saveFolderBtn) saveFolderBtn.addEventListener('click', createFolder);
 
-    // Search bookmarks
-    const searchInput = document.getElementById('bookmarkSearch');
-    if (searchInput) searchInput.addEventListener('keyup', searchBookmarks);
-    
     // Update action placeholder when selection changes
     const actionSelect = document.getElementById('buttonAction');
     if (actionSelect) actionSelect.addEventListener('change', updateActionPlaceholder);
@@ -403,224 +384,6 @@ function openUrl(url) {
     chrome.tabs.create({ url: url });
 }
 
-// Toggle bookmarks section
-async function toggleBookmarks() {
-    const content = document.getElementById('bookmarksContent');
-    const button = document.getElementById('toggleBookmarks');
-    
-    if (!content || !button) return;
-    
-    if (content.classList.contains('show')) {
-        content.classList.remove('show');
-        button.classList.remove('expanded');
-    } else {
-        content.classList.add('show');
-        button.classList.add('expanded');
-        
-        if (bookmarksData.length === 0) {
-            await loadBookmarks();
-        }
-    }
-}
-
-// Load all bookmarks
-async function loadBookmarks() {
-    try {
-        console.log('Loading bookmarks...');
-        const bookmarks = await chrome.bookmarks.getTree();
-        bookmarksData = bookmarks;
-        renderBookmarks();
-    } catch (error) {
-        console.error('Error loading bookmarks:', error);
-        const bookmarksTree = document.getElementById('bookmarksTree');
-        if (bookmarksTree) {
-            bookmarksTree.innerHTML = '<div class="loading">Error loading bookmarks</div>';
-        }
-    }
-}
-
-// Render bookmarks tree
-function renderBookmarks() {
-    const container = document.getElementById('bookmarksTree');
-    if (!container) return;
-    
-    container.innerHTML = '';
-    
-    function renderBookmarkNode(node, level = 0) {
-        // Only exclude Mobile bookmarks, keep Other bookmarks as they're useful
-        if (node.title === 'Mobile bookmarks') return null;
-        
-        const item = document.createElement('div');
-        item.style.marginLeft = `${level * 20}px`;
-        
-        if (node.children) {
-            // Folder
-            item.className = 'bookmark-folder';
-            item.innerHTML = `
-                <svg class="icon" viewBox="0 0 24 24">
-                    <path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2h-8l-2-2z"/>
-                </svg>
-                ${node.title || 'Untitled Folder'}
-            `;
-            
-            let isExpanded = false;
-            item.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const children = item.nextElementSibling;
-                if (children && children.classList.contains('bookmark-children')) {
-                    isExpanded = !isExpanded;
-                    children.style.display = isExpanded ? 'block' : 'none';
-                }
-            });
-            
-            container.appendChild(item);
-            
-            const childrenContainer = document.createElement('div');
-            childrenContainer.className = 'bookmark-children';
-            childrenContainer.style.display = 'none';
-            
-            node.children.forEach(child => {
-                const childElement = renderBookmarkNode(child, level + 1);
-                if (childElement) {
-                    childrenContainer.appendChild(childElement);
-                }
-            });
-            
-            container.appendChild(childrenContainer);
-            
-        } else if (node.url) {
-            // Bookmark
-            item.className = 'bookmark-item';
-            item.innerHTML = `
-                <svg class="icon" viewBox="0 0 24 24">
-                    <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H6.9C3.71 7 1 9.71 1 13s2.71 6 6 6h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c3.29 0 6-2.71 6-6s-2.71-6-6-6z"/>
-                </svg>
-                ${node.title || 'Untitled Bookmark'}
-            `;
-            
-            item.addEventListener('click', () => openUrl(node.url));
-            item.title = node.url;
-            
-            return item;
-        }
-        
-        return item;
-    }
-    
-    if (bookmarksData && bookmarksData[0] && bookmarksData[0].children) {
-        bookmarksData[0].children.forEach(node => {
-            const element = renderBookmarkNode(node);
-            if (element) {
-                container.appendChild(element);
-            }
-        });
-    }
-}
-
-// Search bookmarks
-function searchBookmarks() {
-    const searchInput = document.getElementById('bookmarkSearch');
-    if (!searchInput) return;
-    
-    const query = searchInput.value.toLowerCase();
-    const items = document.querySelectorAll('.bookmark-item, .bookmark-folder');
-    
-    items.forEach(item => {
-        const text = item.textContent.toLowerCase();
-        if (text.includes(query) || query === '') {
-            item.style.display = 'flex';
-        } else {
-            item.style.display = 'none';
-        }
-    });
-}
-
-// Toggle reading list section
-async function toggleReadingList() {
-    const content = document.getElementById('readingListContent');
-    const button = document.getElementById('toggleReadingList');
-    
-    if (!content || !button) return;
-    
-    if (content.classList.contains('show')) {
-        content.classList.remove('show');
-        button.classList.remove('expanded');
-    } else {
-        content.classList.add('show');
-        button.classList.add('expanded');
-        
-        if (readingListData.length === 0) {
-            await loadReadingList();
-        }
-    }
-}
-
-// Load reading list
-async function loadReadingList() {
-    try {
-        // Check if reading list API is available
-        if (chrome.readingList && chrome.readingList.query) {
-            console.log('Loading reading list...');
-            const readingList = await chrome.readingList.query({});
-            readingListData = readingList;
-            renderReadingList();
-            console.log(`Loaded ${readingList.length} reading list items`);
-        } else {
-            console.log('Reading list API not available');
-            const container = document.getElementById('readingList');
-            if (container) {
-                container.innerHTML = '<div class="loading">Reading list not available in this Chrome version</div>';
-            }
-        }
-    } catch (error) {
-        console.error('Error loading reading list:', error);
-        const container = document.getElementById('readingList');
-        if (container) {
-            container.innerHTML = '<div class="loading">Error loading reading list</div>';
-        }
-    }
-}
-
-// Render reading list
-function renderReadingList() {
-    const container = document.getElementById('readingList');
-    const statsContainer = document.getElementById('readingListStats');
-    
-    if (!container) return;
-    
-    if (readingListData.length === 0) {
-        container.innerHTML = '<div class="loading">No items in reading list</div>';
-        if (statsContainer) statsContainer.textContent = '';
-        return;
-    }
-    
-    const unreadCount = readingListData.filter(item => !item.hasBeenRead).length;
-    if (statsContainer) {
-        statsContainer.textContent = `${readingListData.length} total, ${unreadCount} unread`;
-    }
-    
-    container.innerHTML = '';
-    
-    readingListData.forEach(item => {
-        const readingItem = document.createElement('div');
-        readingItem.className = 'reading-item';
-        readingItem.addEventListener('click', () => openUrl(item.url));
-        
-        readingItem.innerHTML = `
-            <svg class="icon" viewBox="0 0 24 24">
-                <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
-            </svg>
-            <div class="reading-item-content">
-                <div class="reading-item-title">${item.title || 'Untitled'}</div>
-                <div class="reading-item-url">${item.url}</div>
-            </div>
-            ${item.hasBeenRead ? '' : '<div style="width: 8px; height: 8px; background: #64ffda; border-radius: 50%; margin-left: auto;"></div>'}
-        `;
-        
-        container.appendChild(readingItem);
-    });
-}
-
 // Custom button functionality
 function openAddCustomButton() {
     const modal = document.getElementById('customButtonModal');
@@ -715,6 +478,219 @@ async function loadCustomButtons() {
     } catch (error) {
         console.error('Error loading custom buttons:', error);
     }
+}
+
+// Load Jira configuration
+async function loadJiraConfig() {
+    try {
+        const result = await chrome.storage.local.get(['jiraConfig']);
+
+        if (result.jiraConfig) {
+            jiraConfig = result.jiraConfig;
+            console.log('Jira config loaded from storage');
+            console.log(jiraConfig);
+        } else {
+            // Hardcoded default config - UPDATE THESE VALUES
+            jiraConfig = {
+                baseUrl: 'https://zineone.atlassian.net',
+                email: 'EMAIL_HERE', // TODO: ENTER YOUR EMAIL
+                apiToken: 'API_TOKEN_HERE', // TODO: ENTER YOUR API TOKEN
+                jql: 'assignee = currentUser() AND statusCategory != done ORDER BY updated DESC',
+                maxResults: 50
+            };
+
+            await chrome.storage.local.set({ jiraConfig });
+            console.log('Jira config initialized with defaults');
+        }
+    } catch (error) {
+        console.error('Error loading Jira config:', error);
+    }
+}
+
+// Fetch issues from Jira API
+async function fetchJiraIssues() {
+    if (!jiraConfig || !jiraConfig.apiToken || jiraConfig.apiToken === 'YOUR_API_TOKEN_HERE') {
+        await loadJiraConfig()
+        if (!jiraConfig || !jiraConfig.apiToken || jiraConfig.apiToken === 'YOUR_API_TOKEN_HERE') {
+            throw new Error('Jira API token not configured. Please update the credentials in the code.');
+        }
+    }
+
+    // Use the new /search/jql endpoint (old /search is deprecated)
+    const url = `${jiraConfig.baseUrl}/rest/api/3/search/jql`;
+
+    const auth = btoa(`${jiraConfig.email}:${jiraConfig.apiToken}`);
+
+    console.log('Fetching from URL:', url);
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Basic ${auth}`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        },
+        credentials: 'omit',
+        body: JSON.stringify({
+            jql: jiraConfig.jql,
+            maxResults: jiraConfig.maxResults,
+            fields: ['summary', 'status', 'updated']
+        })
+    });
+
+    console.log('Response status:', response.status);
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Jira API error details:', errorText);
+
+        if (response.status === 401) {
+            throw new Error('Authentication failed. Check your email and API token.');
+        } else if (response.status === 403) {
+            throw new Error('Access denied. Check your Jira permissions.');
+        } else if (response.status === 410) {
+            throw new Error('Jira API endpoint deprecated or unavailable. Please check your Jira instance configuration.');
+        } else {
+            throw new Error(`Jira API error: ${response.status} ${response.statusText}`);
+        }
+    }
+
+    const data = await response.json();
+    console.log('Successfully fetched issues:', data.total);
+    return data.issues || [];
+}
+
+// Load and display Jira issues
+async function loadJiraIssues() {
+    const container = document.getElementById('jiraContent');
+    const statsContainer = document.getElementById('jiraStats');
+
+    if (!container) return;
+
+    try {
+        container.innerHTML = '<div class="loading">Loading Jira issues...</div>';
+        if (statsContainer) statsContainer.textContent = '';
+
+        console.log('Fetching Jira issues...');
+        const issues = await fetchJiraIssues();
+
+        jiraData = issues;
+        renderJiraIssues();
+
+        console.log(`Loaded ${issues.length} Jira issues`);
+    } catch (error) {
+        console.error('Error loading Jira issues:', error);
+
+        container.innerHTML = `
+            <div class="jira-error">
+                <svg class="icon" viewBox="0 0 24 24">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                </svg>
+                <div class="jira-error-title">Failed to load Jira issues</div>
+                <div class="jira-error-message">${error.message}</div>
+            </div>
+        `;
+
+        if (statsContainer) {
+            statsContainer.textContent = 'Error loading data';
+        }
+    }
+}
+
+// Render Jira issues to DOM
+function renderJiraIssues() {
+    const container = document.getElementById('jiraContent');
+    const statsContainer = document.getElementById('jiraStats');
+
+    if (!container) return;
+
+    if (jiraData.length === 0) {
+        container.innerHTML = '<div class="loading">No issues assigned to you</div>';
+        if (statsContainer) statsContainer.textContent = '';
+        return;
+    }
+
+    // Define status priority for sorting (lower number = higher priority)
+    const statusPriority = {
+        'In Review': 1,
+        'Code Review': 1,
+        'Review': 1,
+        'In Progress': 2,
+        'To Do': 3,
+        'Todo': 3,
+        'Backlog': 4
+    };
+
+    // Sort issues by status priority
+    const sortedIssues = [...jiraData].sort((a, b) => {
+        const statusA = a.fields.status.name;
+        const statusB = b.fields.status.name;
+        const priorityA = statusPriority[statusA] || 999; // Unknown statuses go to the end
+        const priorityB = statusPriority[statusB] || 999;
+
+        if (priorityA !== priorityB) {
+            return priorityA - priorityB;
+        }
+
+        // If same priority, sort by updated date (most recent first)
+        return new Date(b.fields.updated) - new Date(a.fields.updated);
+    });
+
+    // Calculate stats by status
+    const statusCounts = {};
+    sortedIssues.forEach(issue => {
+        const status = issue.fields.status.name;
+        statusCounts[status] = (statusCounts[status] || 0) + 1;
+    });
+
+    // Display stats
+    if (statsContainer) {
+        const statsText = `${sortedIssues.length} total`;
+        const statusParts = Object.entries(statusCounts)
+            .map(([status, count]) => `${count} ${status}`)
+            .join(', ');
+        statsContainer.textContent = `${statsText} (${statusParts})`;
+    }
+
+    // Render issues
+    container.innerHTML = '';
+
+    sortedIssues.forEach(issue => {
+        const issueElement = createJiraIssueElement(issue);
+        container.appendChild(issueElement);
+    });
+}
+
+// Create individual issue DOM element
+function createJiraIssueElement(issue) {
+    const issueDiv = document.createElement('div');
+    issueDiv.className = 'jira-issue';
+    issueDiv.addEventListener('click', () => openJiraIssue(issue.key));
+
+    const statusCategory = issue.fields.status.statusCategory?.key || 'new';
+
+    issueDiv.innerHTML = `
+        <div class="jira-issue-key">${issue.key}</div>
+        <div class="jira-issue-content">
+            <div class="jira-issue-title">${issue.fields.summary}</div>
+            <div class="jira-status-badge jira-status-${statusCategory}">
+                ${issue.fields.status.name}
+            </div>
+        </div>
+        <svg class="icon jira-arrow" viewBox="0 0 24 24">
+            <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
+        </svg>
+    `;
+
+    return issueDiv;
+}
+
+// Open Jira issue in new tab
+function openJiraIssue(issueKey) {
+    if (!issueKey || !jiraConfig) return;
+
+    const url = `${jiraConfig.baseUrl}/browse/${issueKey}`;
+    chrome.tabs.create({ url: url });
 }
 
 function renderCustomButtons() {
