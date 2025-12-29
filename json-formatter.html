@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSON Formatter & Sorter</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+
+        function JSONFormatter() {
+            const [input, setInput] = useState('');
+            const [output, setOutput] = useState('');
+            const [error, setError] = useState('');
+            const [copied, setCopied] = useState(false);
+
+            const sortKeysRecursively = (obj) => {
+                if (Array.isArray(obj)) {
+                    return obj.map(item => sortKeysRecursively(item));
+                } else if (obj !== null && typeof obj === 'object') {
+                    return Object.keys(obj)
+                        .sort()
+                        .reduce((sorted, key) => {
+                            sorted[key] = sortKeysRecursively(obj[key]);
+                            return sorted;
+                        }, {});
+                }
+                return obj;
+            };
+
+            const handleFormat = () => {
+                setError('');
+                setOutput('');
+                setCopied(false);
+
+                if (!input.trim()) {
+                    setError('Please enter some JSON to format');
+                    return;
+                }
+
+                try {
+                    const parsed = JSON.parse(input);
+                    const sorted = sortKeysRecursively(parsed);
+                    const formatted = JSON.stringify(sorted, null, 2);
+                    setOutput(formatted);
+                } catch (e) {
+                    setError(`Invalid JSON: ${e.message}`);
+                }
+            };
+
+            const handleCopy = async () => {
+                if (!output) return;
+                
+                try {
+                    await navigator.clipboard.writeText(output);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                } catch (e) {
+                    console.error('Failed to copy:', e);
+                }
+            };
+
+            const handleClear = () => {
+                setInput('');
+                setOutput('');
+                setError('');
+                setCopied(false);
+            };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+                    <div className="max-w-6xl mx-auto">
+                        <div className="bg-white rounded-lg shadow-xl p-6 mb-6">
+                            <h1 className="text-3xl font-bold text-gray-800 mb-2">JSON Formatter & Sorter</h1>
+                            <p className="text-gray-600 mb-6">Format and alphabetically sort JSON keys at all nesting levels</p>
+
+                            <div className="grid md:grid-cols-2 gap-6">
+                                {/* Input Section */}
+                                <div className="flex flex-col">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <label className="text-sm font-semibold text-gray-700">Input JSON</label>
+                                        <button
+                                            onClick={handleClear}
+                                            className="text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                                        >
+                                            Clear All
+                                        </button>
+                                    </div>
+                                    <textarea
+                                        value={input}
+                                        onChange={(e) => setInput(e.target.value)}
+                                        placeholder={'Paste your JSON here, e.g.:\n{\n  "name": "John",\n  "age": 30,\n  "address": {\n    "city": "NYC",\n    "zip": "10001"\n  }\n}'}
+                                        className="w-full h-96 p-4 font-mono text-sm border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none resize-none"
+                                    />
+                                    <button
+                                        onClick={handleFormat}
+                                        className="mt-4 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors shadow-md hover:shadow-lg"
+                                    >
+                                        Format & Sort
+                                    </button>
+                                </div>
+
+                                {/* Output Section */}
+                                <div className="flex flex-col">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <label className="text-sm font-semibold text-gray-700">Formatted Output</label>
+                                        {output && (
+                                            <button
+                                                onClick={handleCopy}
+                                                className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-700 transition-colors"
+                                            >
+                                                {copied ? (
+                                                    <>
+                                                        <span>✓</span>
+                                                        Copied!
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <span>📋</span>
+                                                        Copy
+                                                    </>
+                                                )}
+                                            </button>
+                                        )}
+                                    </div>
+                                    
+                                    {error && (
+                                        <div className="mb-4 p-4 bg-red-50 border-2 border-red-200 rounded-lg flex items-start gap-2">
+                                            <span className="text-red-500 flex-shrink-0 mt-0.5">⚠</span>
+                                            <div>
+                                                <p className="text-sm font-semibold text-red-800">Error</p>
+                                                <p className="text-sm text-red-600">{error}</p>
+                                            </div>
+                                        </div>
+                                    )}
+                                    
+                                    <div className="relative flex-1">
+                                        <textarea
+                                            value={output}
+                                            readOnly
+                                            placeholder="Formatted JSON will appear here..."
+                                            className="w-full h-96 p-4 font-mono text-sm border-2 border-gray-300 rounded-lg bg-gray-50 resize-none"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Features Info */}
+                        <div className="bg-white rounded-lg shadow-md p-6">
+                            <h2 className="text-lg font-semibold text-gray-800 mb-3">Features</h2>
+                            <ul className="grid md:grid-cols-2 gap-2 text-sm text-gray-600">
+                                <li className="flex items-center gap-2">
+                                    <span className="text-indigo-600">✓</span> Alphabetically sorts all keys
+                                </li>
+                                <li className="flex items-center gap-2">
+                                    <span className="text-indigo-600">✓</span> Recursive sorting for nested objects
+                                </li>
+                                <li className="flex items-center gap-2">
+                                    <span className="text-indigo-600">✓</span> Proper indentation (2 spaces)
+                                </li>
+                                <li className="flex items-center gap-2">
+                                    <span className="text-indigo-600">✓</span> Copy to clipboard
+                                </li>
+                                <li className="flex items-center gap-2">
+                                    <span className="text-indigo-600">✓</span> Handles arrays and nested structures
+                                </li>
+                                <li className="flex items-center gap-2">
+                                    <span className="text-indigo-600">✓</span> Clear error messages
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<JSONFormatter />, document.getElementById('root'));
+    </script>
+</body>
+</html>
