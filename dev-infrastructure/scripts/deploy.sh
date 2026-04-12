@@ -5,7 +5,7 @@
 # Usage: ./deploy.sh <dev-number> [path-to-war-files]
 # Example: 
 #   ./deploy.sh dev1                           # Deploy local war/ folder
-#   ./deploy.sh dev1 /home/user/build/war      # Deploy from specific path
+#   ./deploy.sh dev1 ./build/war               # Deploy from specific path
 #   ./deploy.sh dev1 --restart                 # Deploy and restart
 # =============================================================================
 

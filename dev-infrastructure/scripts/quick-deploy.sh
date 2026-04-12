@@ -16,10 +16,13 @@
 
 set -e
 
-# Configuration - UPDATE THESE
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INFRA_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Configuration (override via env vars)
 UBUNTU_SERVER="${UBUNTU_SERVER:-ubuntu@your-server-ip}"
-REMOTE_DIR="/opt/dev-infrastructure"
-LOCAL_BUILD_DIR="/Users/yashwant/udichi/war"
+REMOTE_DIR="${REMOTE_DIR:-dev-infrastructure}"
+LOCAL_BUILD_DIR="${LOCAL_BUILD_DIR:-./war}"
 
 # Validate input
 if [ $# -lt 1 ]; then
@@ -28,6 +31,10 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Make sure to set UBUNTU_SERVER environment variable:"
     echo "export UBUNTU_SERVER=ubuntu@your-server-ip"
+    echo ""
+    echo "Optional overrides:"
+    echo "export REMOTE_DIR=dev-infrastructure"
+    echo "export LOCAL_BUILD_DIR=./war"
     exit 1
 fi
 
@@ -45,9 +52,8 @@ echo ""
 # Step 1: Build locally
 echo "🔨 Step 1: Building locally..."
 
-cd /Users/yashwant/udichi
-echo "  Building udichi..."
-# Add your build command here when needed
+echo "  Build step is project-specific."
+echo "  Run your build command first, then ensure artifacts exist in: $LOCAL_BUILD_DIR"
 
 echo "✅ Build complete"
 echo ""
@@ -55,8 +61,20 @@ echo ""
 # Step 2: Deploy to server
 echo "📤 Step 2: Deploying to server..."
 
+# Resolve local build path relative to infra repo if needed
+if [[ "$LOCAL_BUILD_DIR" != /* ]]; then
+    LOCAL_BUILD_PATH="$INFRA_DIR/$LOCAL_BUILD_DIR"
+else
+    LOCAL_BUILD_PATH="$LOCAL_BUILD_DIR"
+fi
+
+if [ ! -d "$LOCAL_BUILD_PATH" ]; then
+    echo "❌ Build directory not found: $LOCAL_BUILD_PATH"
+    exit 1
+fi
+
 # Copy WAR files
-scp -r "$LOCAL_BUILD_DIR"/* "$UBUNTU_SERVER:$REMOTE_DIR/instances/$INSTANCE/war/"
+scp -r "$LOCAL_BUILD_PATH"/* "$UBUNTU_SERVER:$REMOTE_DIR/instances/$INSTANCE/war/"
 
 echo "✅ Files copied"
 echo ""
