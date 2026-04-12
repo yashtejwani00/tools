@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: shared-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-CHANGE_ME}
+    networks:
+      - dev-shared-network
+    command: mongod --bind_ip_all
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hbase:
+    image: harisekhon/hbase:2.5
+    container_name: shared-hbase
+    restart: unless-stopped
+    ports:
+      - "2180:2181"    # ZK client port (shifted to avoid conflict with instance ZKs)
+      - "16000:16000"  # Master port
+      - "16020:16020"  # RegionServer port
+      - "16030:16030"  # RegionServer UI
+      - "9090:9090"    # REST API
+      - "8085:8085"    # REST UI
+    volumes:
+      - hbase-data:/hbase-data
+    environment:
+      - HBASE_CONF_hbase_rootdir=file:///hbase-data
+      - HBASE_CONF_hbase_cluster_distributed=false
+      - HBASE_CONF_hbase_zookeeper_quorum=localhost
+    networks:
+      - dev-shared-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:16030/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  mongo-data:
+    driver: local
+  hbase-data:
+    driver: local
+
+networks:
+  dev-shared-network:
+    driver: bridge
+    name: dev-shared-network

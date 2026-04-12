@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Local AI/tooling metadata
+**/.claude/
+
+# Local environment files
+**/.env
+**/.env.*

@@ -1,0 +1,102 @@
+version: '3.8'
+
+# Template for developer instances
+# Copy this to instances/dev{N}/docker-compose.yml and update the .env file
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: dev${DEV_NUMBER}-zookeeper
+    restart: unless-stopped
+    ports:
+      - "${ZK_PORT}:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - dev-instance-network
+      - dev-shared-network
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo 'ruok' | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: dev${DEV_NUMBER}-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_PORT}:9092"
+      - "${KAFKA_EXTERNAL_PORT}:9093"
+    environment:
+      KAFKA_BROKER_ID: ${DEV_NUMBER}
+      KAFKA_ZOOKEEPER_CONNECT: dev${DEV_NUMBER}-zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://dev${DEV_NUMBER}-kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+    networks:
+      - dev-instance-network
+      - dev-shared-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  udichi:
+    image: openjdk:17-jdk-slim
+    container_name: dev${DEV_NUMBER}-udichi
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "${UDICHI_PORT}:8888"
+    volumes:
+      - ./war:/opt/udichi/war:ro
+      - ./config:/opt/udichi/config:ro
+      - ./logs:/opt/udichi/logs
+      - ./scripts/start-udichi.sh:/opt/udichi/bin/start-udichi.sh:ro
+    environment:
+      - DEV_NUMBER=${DEV_NUMBER}
+      - UDICHI_PORT=8888
+      - KAFKA_BOOTSTRAP_SERVERS=dev${DEV_NUMBER}-kafka:9092
+      - ZOOKEEPER_CONNECT=dev${DEV_NUMBER}-zookeeper:2181
+      - MONGODB_URI=mongodb://admin:${MONGO_ROOT_PASSWORD:-CHANGE_ME}@shared-mongodb:27017/dev${DEV_NUMBER}?authSource=admin
+      - HBASE_ZOOKEEPER_QUORUM=shared-hbase:2181
+      - HBASE_ZOOKEEPER_PORT=2181
+      - JAVA_OPTS=-Xms512m -Xmx2g -XX:+UseG1GC
+    working_dir: /opt/udichi
+    command: ["/bin/bash", "/opt/udichi/bin/start-udichi.sh"]
+    networks:
+      - dev-instance-network
+      - dev-shared-network
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8888'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+networks:
+  dev-instance-network:
+    driver: bridge
+    name: dev${DEV_NUMBER}-network
+  dev-shared-network:
+    external: true
+    name: dev-shared-network
