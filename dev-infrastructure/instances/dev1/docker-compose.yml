@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   zookeeper:
-    image: wurstmeister/zookeeper:3.4.6
+    image: zookeeper:3.4.14
     container_name: dev${DEV_NUMBER}-zookeeper
     restart: unless-stopped
     ports:
@@ -59,14 +59,14 @@ services:
     ports:
       - "${UDICHI_PORT}:8888"
     volumes:
-      - ./war:/opt/udichi/war:ro
-      - ./config:/opt/udichi/config:ro
-      - ./logs:/opt/udichi/logs
-      - ./scripts/start-udichi.sh:/opt/udichi/bin/start-udichi.sh:ro
+      - ./udichi:/opt/udichi
     environment:
       - DEV_NUMBER=${DEV_NUMBER}
       - UDICHI_PORT=8888
       - KAFKA_BOOTSTRAP_SERVERS=dev${DEV_NUMBER}-kafka:9092
+      - STREAM_KAFKA_BOOTSTRAP_SERVERS=dev${DEV_NUMBER}-kafka:9092
+      - STREAM_KAFKA_PRODUCER_BOOTSTRAP_SERVERS=dev${DEV_NUMBER}-kafka:9092
+      - STREAM_KAFKA_CONSUMER_BOOTSTRAP_SERVERS=dev${DEV_NUMBER}-kafka:9092
       - ZOOKEEPER_CONNECT=dev${DEV_NUMBER}-zookeeper:2181
       - MONGODB_URI=mongodb://admin:${MONGO_ROOT_PASSWORD:-CHANGE_ME}@shared-mongodb:27017/dev${DEV_NUMBER}?authSource=admin
       - HBASE_ZOOKEEPER_QUORUM=shared-zookeeper

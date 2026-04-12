@@ -27,20 +27,29 @@ export JAVA_OPTS="${JAVA_OPTS:--Xms512m -Xmx2g -XX:+UseG1GC}"
 echo "Java Options: $JAVA_OPTS"
 echo ""
 
-# Wait for dependencies
-echo "⏳ Waiting for Kafka..."
-until kafka-broker-api-versions --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS" &>/dev/null; do
-    echo "  Kafka not ready, waiting..."
-    sleep 2
-done
-echo "✅ Kafka is ready"
+# Wait for dependencies using bash TCP checks only.
+wait_for_tcp() {
+    local host="$1"
+    local port="$2"
+    local label="$3"
+    local retries=60
+    local count=0
 
-echo "⏳ Waiting for Zookeeper..."
-until echo "ruok" | nc "dev${DEV_NUMBER}-zookeeper" 2181 | grep -q "imok"; do
-    echo "  Zookeeper not ready, waiting..."
-    sleep 2
-done
-echo "✅ Zookeeper is ready"
+    echo "⏳ Waiting for ${label} (${host}:${port})..."
+    until bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; do
+        count=$((count + 1))
+        if [ "$count" -ge "$retries" ]; then
+            echo "❌ ${label} did not become reachable in time"
+            exit 1
+        fi
+        echo "  ${label} not ready, waiting..."
+        sleep 2
+    done
+    echo "✅ ${label} is reachable"
+}
+
+wait_for_tcp "dev${DEV_NUMBER}-kafka" "9092" "Kafka"
+wait_for_tcp "dev${DEV_NUMBER}-zookeeper" "2181" "Zookeeper"
 
 echo ""
 

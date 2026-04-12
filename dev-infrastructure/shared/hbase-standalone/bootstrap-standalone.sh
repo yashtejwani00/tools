@@ -17,25 +17,18 @@ daemon_pid_is_running() {
   kill -0 "$pid" >/dev/null 2>&1
 }
 
-wait_for_port() {
-  port="$1"
+wait_for_pid_file() {
+  pid_file="$1"
+  label="$2"
   attempts=0
   max_attempts=60
   while true; do
-    if command -v nc >/dev/null 2>&1; then
-      if nc -z localhost "$port" >/dev/null 2>&1; then
-        return 0
-      fi
-    elif command -v bash >/dev/null 2>&1; then
-      if bash -c "</dev/tcp/localhost/${port}" >/dev/null 2>&1; then
-        return 0
-      fi
-    else
-      sleep 20
+    if daemon_pid_is_running "$pid_file"; then
       return 0
     fi
     attempts=$((attempts + 1))
     if [ "$attempts" -ge "$max_attempts" ]; then
+      echo "${label} failed to start (PID file: ${pid_file})"
       return 1
     fi
     sleep 2
@@ -69,14 +62,14 @@ echo "Starting HBase in pseudo-distributed mode (master + regionserver)..."
 echo "Using external ZooKeeper at shared-zookeeper:2181"
 
 /opt/hbase/bin/hbase-daemon.sh start master
-if ! wait_for_port "$MASTER_PORT"; then
+if ! wait_for_pid_file "$MASTER_PID_FILE" "HBase master"; then
   echo "HBase master failed before becoming ready."
   stop_all
   exit 1
 fi
 
 /opt/hbase/bin/hbase-daemon.sh start regionserver
-if ! wait_for_port "$RS_PORT"; then
+if ! wait_for_pid_file "$RS_PID_FILE" "HBase regionserver"; then
   echo "HBase regionserver failed before becoming ready."
   stop_all
   exit 1

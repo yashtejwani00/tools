@@ -1,0 +1,2 @@
+# Ignore local Udichi source drops in per-dev instances
+instances/dev*/udichi/

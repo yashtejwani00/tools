@@ -34,11 +34,19 @@ for INSTANCE_DIR in "$INFRA_DIR"/instances/dev[1-3]; do
     fi
 
     source "$INSTANCE_DIR/.env"
-    RUNNING=$(docker ps --filter "name=${INSTANCE}-" --format "{{.Names}}" | wc -l)
+    UDICHI_STATE=$(docker inspect -f '{{.State.Status}}' "${INSTANCE}-udichi" 2>/dev/null || echo "missing")
+    KAFKA_STATE=$(docker inspect -f '{{.State.Status}}' "${INSTANCE}-kafka" 2>/dev/null || echo "missing")
+    ZK_STATE=$(docker inspect -f '{{.State.Status}}' "${INSTANCE}-zookeeper" 2>/dev/null || echo "missing")
 
-    if [ "$RUNNING" -gt 0 ]; then
+    if [ "$UDICHI_STATE" = "running" ]; then
         STATUS="🟢 RUNNING"
         URLS="http://localhost:$UDICHI_PORT"
+    elif [ "$UDICHI_STATE" = "restarting" ]; then
+        STATUS="🟠 APP_RESTARTING"
+        URLS="http://localhost:$UDICHI_PORT"
+    elif [ "$KAFKA_STATE" = "running" ] || [ "$ZK_STATE" = "running" ]; then
+        STATUS="🟡 BROKER_ONLY"
+        URLS="kafka:localhost:$KAFKA_EXTERNAL_PORT"
     else
         STATUS="🔴 STOPPED"
         URLS="-"

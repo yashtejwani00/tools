@@ -13,7 +13,7 @@ These are intentionally aligned with local runtime lineage and approved pullable
 
 - Java: `eclipse-temurin:8-jdk-jammy`
 - Kafka: `wurstmeister/kafka:2.11-0.10.2.2` (matches local `0.10.x` line from `udichi/ext/kafka/libs`)
-- ZooKeeper: `wurstmeister/zookeeper:3.4.6`
+- ZooKeeper: `zookeeper:3.4.14`
 - MongoDB: `mongo:5.0`
 - HBase: `flokkr/hbase:2.3.3`
 
@@ -105,3 +105,19 @@ docker logs shared-hbase
 ```bash
 docker exec -it shared-mongodb mongosh -u admin -p ${MONGO_ROOT_PASSWORD:-CHANGE_ME} --authenticationDatabase admin
 ```
+
+### Udichi admin/ops helper scripts
+
+Run from:
+`instances/dev1/udichi/bin`
+
+```bash
+./z1shell.sh
+./z1ops.sh
+./z1install.sh
+./hbase-installer.sh
+```
+
+Notes:
+- These scripts auto-run inside `dev1-udichi` when invoked from host.
+- `z1shell.sh` and `z1ops.sh` use `zk.connect` from `config/udichi.properties` by default (`dev1-zookeeper:2181`).

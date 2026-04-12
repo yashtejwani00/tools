@@ -42,10 +42,22 @@ echo "  Kafka Port:     $KAFKA_PORT"
 echo "  Zookeeper Port: $ZK_PORT"
 echo ""
 
-if [ ! -d "$INSTANCE_DIR/war" ] || [ -z "$(ls -A $INSTANCE_DIR/war 2>/dev/null)" ]; then
-    echo "⚠️  Warning: No WAR files found in $INSTANCE_DIR/war/"
-    echo "   Please deploy your application first:"
-    echo "   ./deploy.sh $INSTANCE"
+HAS_WAR=false
+HAS_UDICHI_DIR=false
+
+if [ -d "$INSTANCE_DIR/war" ] && [ -n "$(ls -A "$INSTANCE_DIR/war" 2>/dev/null)" ]; then
+    HAS_WAR=true
+fi
+
+if [ -d "$INSTANCE_DIR/udichi" ] && [ -f "$INSTANCE_DIR/udichi/bin/start-udichi.sh" ]; then
+    HAS_UDICHI_DIR=true
+fi
+
+if [ "$HAS_WAR" = false ] && [ "$HAS_UDICHI_DIR" = false ]; then
+    echo "⚠️  Warning: No deployable app found."
+    echo "   Expected one of:"
+    echo "   - WAR files in $INSTANCE_DIR/war/"
+    echo "   - Full udichi folder in $INSTANCE_DIR/udichi/"
     echo ""
     read -p "Continue anyway? (y/N) " -n 1 -r
     echo
