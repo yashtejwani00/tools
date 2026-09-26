@@ -12,13 +12,13 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
 
 - **manifest.json** - Chrome extension configuration (Manifest V3)
   - Overrides the new tab page with `newtab.html`
-  - Requires permissions: `bookmarks`, `readingList`, `storage`, `tabs`
+  - Requires permissions: `bookmarks`, `favicon` (Chrome's local favicon cache for tile icons), `readingList`, `storage`, `tabs`
 
 - **newtab.html** - Main dashboard interface
   - Single-page application with embedded modals
-  - Favorites section displays first 8 bookmarks from bookmarks bar
+  - Favorites section starts at "All bookmarks" (like Chrome's bookmarks side panel) with folder navigation
   - Chrome Controls section with expandable bookmarks/reading list
-  - Custom buttons section (conditionally shown when buttons exist)
+  - Custom buttons section, labelled "Shortcuts" in the UI (always shown; "+" in its title opens the add modal)
 
 - **script.js** - Core functionality
   - All JavaScript is vanilla (no frameworks)
@@ -26,14 +26,15 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
   - Global state variables: `bookmarksData`, `customButtons`, `readingListData`
 
 - **styles.css** - Styling
-  - Gradient background with dark theme
+  - Dark theme driven by design tokens (CSS custom properties on `:root`)
   - Responsive grid layout
-  - Custom scrollbar and hover animations
+  - 12-column grid: Favorites spans 7, Jira 5, Shortcuts full width; stacks below 960px
 
 ### Key Features
 
-1. **Favorites Grid** - Displays bookmarks from the Chrome bookmarks bar (max 8)
-   - Loaded via `loadFavorites()` which searches for bookmarks bar by title or folderType
+1. **Favorites Grid** - Browses the whole bookmarks tree, starting at a virtual "All bookmarks" folder
+   - `buildAllBookmarksNode()` mirrors Chrome's side panel: Bookmarks bar as a folder, "Other bookmarks" contents inline, Mobile bookmarks only if non-empty
+   - Back from a top-level folder returns to All bookmarks; "New folder" there creates it in Other bookmarks
    - Can add new favorites via modal that creates bookmarks in bookmarks bar
 
 2. **Chrome Controls** - Quick access buttons with expandable sections
@@ -46,8 +47,8 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
    - Persistent across sessions
 
 4. **Custom Search Bar** - Main search input at top
-   - Currently hardcoded to search Jira (ZMOB- prefix)
-   - Located in `performSearch()` function in script.js:717-740
+   - Opens `<configured Jira URL>/browse/ZMOB-<query>`
+   - Located in `performSearch()` in script.js
 
 ## Development Commands
 
@@ -77,14 +78,16 @@ After making code changes:
 
 ### Bookmarks Bar Detection
 
-The extension searches for the bookmarks bar using multiple strategies (script.js:162-166):
-```javascript
-const bookmarkBar = bookmarks[0].children.find(child =>
-    child.title === 'Bookmarks bar' ||
-    child.title === 'Bookmarks Bar' ||
-    child.folderType === 'bookmarks-bar'
-);
-```
+`findBookmarksBar()` in script.js is the single source of truth, used by both the favorites grid and "Add Favorite". It matches `folderType === 'bookmarks-bar'` (preferring a non-empty bar when account bookmarks expose two), then falls back to the title, then to the first root folder.
+
+`loadFavorites(folderId)` always re-fetches from Chrome; with no argument it reloads the folder currently shown. `ALL_BOOKMARKS_ID` is the virtual top level. "Add favorite" still adds to the bookmarks bar (found by `findBookmarksBar()`).
+
+### Jira Configuration
+
+- Configured from the gear button on the Jira card (`jiraSettingsModal`): URL, email, API token, JQL, max results
+- Stored in `chrome.storage.local` under `jiraConfig`; `JIRA_DEFAULTS` in script.js supplies unset values
+- Saving requests host permission for the Jira origin (`optional_host_permissions` in manifest.json)
+- The saved token is never written back into the form or logged; a blank token field keeps it, unless the Jira origin changed
 
 ### Reading List API Compatibility
 
@@ -102,14 +105,14 @@ if (chrome.readingList && chrome.readingList.query) {
 ### Modal Interactions
 
 - Click outside modal to close
-- Two modals: `addFavoriteModal` and `customButtonModal`
+- Modals: `addFavoriteModal`, `customButtonModal`, `createFolderModal`, `jiraSettingsModal`
 - Forms validate input before saving
 
 ## Common Modifications
 
 ### Changing Search Behavior
 
-To modify the main search bar behavior, edit `performSearch()` in script.js:717-740. Currently configured for Jira ticket search with "ZMOB-" prefix.
+To modify the main search bar behavior, edit `performSearch()` in script.js. It opens Jira tickets on the configured Jira URL with the "ZMOB-" prefix.
 
 ### Adjusting Favorites Limit
 
@@ -120,10 +123,17 @@ const favorites = bookmarkBar ? bookmarkBar.children.slice(0, 8) : [];
 
 ### Customizing Theme Colors
 
-Primary colors are defined in styles.css:
-- Background gradient: lines 9-10
-- Accent color: `#a8dadc` (cyan/teal)
-- Secondary text: `#94a3b8` (slate gray)
+All colors, radii, fonts and z-index values are tokens in the `:root` block at the top of styles.css. Change a token rather than hardcoding a value:
+- Single accent: `--accent` (teal); status badges use `--status-*`, folders `--folder`, destructive actions `--danger`
+- Text: `--text`, `--text-muted`, `--text-faint` (one cool-tinted gray family)
+- Surfaces: `--bg`, `--surface`, `--surface-raised`, `--surface-hover`, `--inset`
+
+### UI Conventions
+
+- Form errors: call `showFormError(modalId, message, input)`; don't use `alert()`
+- Clickable tiles built in JS (`div`s): call `makeActivatable(element, role)` so they work from the keyboard
+- Modals: Escape closes the open modal, Enter in a field clicks its `.btn-primary`
+- Loading placeholders use `.skeleton`; empty/status messages use `.loading`
 
 ### Adding New Chrome Controls
 

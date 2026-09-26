@@ -5,12 +5,16 @@
   "description": "A techy homepage with real Chrome integration",
   "permissions": [
     "bookmarks",
+    "favicon",
     "readingList",
     "storage",
     "tabs"
   ],
   "host_permissions": [
     "https://zineone.atlassian.net/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "chrome_url_overrides": {
     "newtab": "newtab.html"

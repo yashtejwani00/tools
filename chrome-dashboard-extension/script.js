@@ -6,22 +6,26 @@ let jiraData = [];
 let jiraConfig = null;
 
 // Favorites navigation state
-let currentFolderId = null; // Currently displayed folder ID
+let currentFolderId = null; // Currently displayed folder ID (or ALL_BOOKMARKS_ID)
 let currentFolderNode = null; // Full folder node object
 let bookmarksBarId = null; // Store bookmarks bar ID for quick access
+let otherBookmarksId = null; // Where "New folder" goes when viewing All bookmarks
+let flattenedFolderIds = new Set(); // "Other bookmarks" folders, shown inline under All bookmarks
+
+// Virtual top-level folder mirroring Chrome's "All Bookmarks" side panel
+const ALL_BOOKMARKS_ID = 'all-bookmarks';
 
 // Initialize extension
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Chrome Dashboard Extension loaded');
     
-    // Removed createParticles() call
     updateTime();
     setInterval(updateTime, 1000);
     
     loadFavorites();
     loadCustomButtons();
-    loadJiraConfig();
-    loadJiraIssues();
+    // Issues need the stored config, so wait for it before fetching
+    loadJiraConfig().then(loadJiraIssues);
     setupEventListeners();
 });
 
@@ -45,7 +49,8 @@ function setupEventListeners() {
     
     // Refresh favorites
     const refreshBtn = document.getElementById('refreshFavorites');
-    if (refreshBtn) refreshBtn.addEventListener('click', loadFavorites);
+    // Wrapped so the click event isn't passed in as a folder ID
+    if (refreshBtn) refreshBtn.addEventListener('click', () => loadFavorites());
     
     // Add favorite
     const addFavBtn = document.getElementById('addFavorite');
@@ -58,7 +63,20 @@ function setupEventListeners() {
     // Refresh Jira
     const refreshJiraBtn = document.getElementById('refreshJira');
     if (refreshJiraBtn) refreshJiraBtn.addEventListener('click', loadJiraIssues);
-    
+
+    // Jira settings modal
+    const jiraSettingsBtn = document.getElementById('jiraSettings');
+    if (jiraSettingsBtn) jiraSettingsBtn.addEventListener('click', openJiraSettingsModal);
+
+    const cancelJiraBtn = document.getElementById('cancelJiraSettings');
+    if (cancelJiraBtn) cancelJiraBtn.addEventListener('click', closeJiraSettingsModal);
+
+    const saveJiraBtn = document.getElementById('saveJiraSettings');
+    if (saveJiraBtn) saveJiraBtn.addEventListener('click', saveJiraSettings);
+
+    const clearJiraBtn = document.getElementById('clearJiraSettings');
+    if (clearJiraBtn) clearJiraBtn.addEventListener('click', clearJiraSettings);
+
     // Custom button modal
     const addCustomBtn = document.getElementById('addCustomButton');
     if (addCustomBtn) addCustomBtn.addEventListener('click', openAddCustomButton);
@@ -114,28 +132,58 @@ function setupEventListeners() {
             }
         });
     }
-}
 
-// Create floating particles animation
-function createParticles() {
-    const particlesContainer = document.getElementById('particles');
-    if (!particlesContainer) return;
-    
-    const particleCount = 50;
-    
-    for (let i = 0; i < particleCount; i++) {
-        const particle = document.createElement('div');
-        particle.className = 'particle';
-        particle.style.left = Math.random() * 100 + '%';
-        particle.style.animationDelay = Math.random() * 6 + 's';
-        particle.style.animationDuration = (Math.random() * 3 + 3) + 's';
-        particlesContainer.appendChild(particle);
+    const jiraModal = document.getElementById('jiraSettingsModal');
+    if (jiraModal) {
+        jiraModal.addEventListener('click', function(event) {
+            if (event.target === this) {
+                closeJiraSettingsModal();
+            }
+        });
     }
+
+    // Issue list fade: recheck on scroll, resize, and whenever its content is replaced
+    const jiraContent = document.getElementById('jiraContent');
+    if (jiraContent) {
+        jiraContent.addEventListener('scroll', updateJiraScrollFade, { passive: true });
+        new ResizeObserver(updateJiraScrollFade).observe(jiraContent);
+        new MutationObserver(updateJiraScrollFade).observe(jiraContent, { childList: true });
+    }
+
+    // Keyboard: Escape closes the open modal, Enter in a field submits it
+    const modalClosers = {
+        addFavoriteModal: closeFavoriteModal,
+        customButtonModal: closeModal,
+        createFolderModal: closeFolderModal,
+        jiraSettingsModal: closeJiraSettingsModal
+    };
+
+    document.addEventListener('keydown', function(event) {
+        const openModalId = Object.keys(modalClosers).find(id => {
+            const modal = document.getElementById(id);
+            return modal && modal.style.display === 'block';
+        });
+        if (!openModalId) return;
+
+        if (event.key === 'Escape') {
+            modalClosers[openModalId]();
+        } else if (event.key === 'Enter' && !event.isComposing && event.target.matches('.modal input')) {
+            event.preventDefault();
+            const primaryButton = document.getElementById(openModalId).querySelector('.btn-primary');
+            if (primaryButton) primaryButton.click();
+        }
+    });
+
+    // Clear a field's error highlight as soon as it's edited
+    document.querySelectorAll('.modal input, .modal select').forEach(field => {
+        field.addEventListener('input', () => field.removeAttribute('aria-invalid'));
+    });
 }
 
 // Update time display
 function updateTime() {
     const timeDisplay = document.getElementById('timeDisplay');
+    const dateDisplay = document.getElementById('dateDisplay');
     if (!timeDisplay) return;
     
     const now = new Date();
@@ -145,28 +193,78 @@ function updateTime() {
         minute: '2-digit' 
     });
     const dateString = now.toLocaleDateString('en-US', { 
-        weekday: 'short', 
-        month: 'short', 
+        weekday: 'long', 
+        month: 'long', 
         day: 'numeric' 
     });
-    timeDisplay.textContent = `${timeString} | ${dateString}`;
+    timeDisplay.textContent = timeString;
+    if (dateDisplay) dateDisplay.textContent = dateString;
 }
 
-// Load favorites from Chrome bookmarks with folder navigation support
-async function loadFavorites(folderId = null) {
-    try {
-        console.log('Loading favorites...', folderId ? `Folder: ${folderId}` : 'Root');
-        const bookmarks = await chrome.bookmarks.getTree();
-        const favoritesGrid = document.getElementById('favoritesGrid');
+// Find the bookmarks bar in a bookmarks tree.
+// Shared by the favorites grid and "Add Favorite" so both always target the same folder.
+function findBookmarksBar(tree) {
+    const roots = (tree && tree[0] && tree[0].children) || [];
 
-        if (!favoritesGrid) {
-            console.error('Favorites grid element not found');
-            return;
+    // folderType is locale-independent (Chrome 134+). Profiles with account bookmarks
+    // can expose more than one bar; prefer the one that actually has content.
+    const bars = roots.filter(node => node.folderType === 'bookmarks-bar');
+    if (bars.length > 0) {
+        return bars.find(node => node.children && node.children.length > 0) || bars[0];
+    }
+
+    // Older Chrome: match by title, then fall back to the first root folder (the bar's standard slot)
+    return roots.find(node =>
+        node.title === 'Bookmarks bar' ||
+        node.title === 'Bookmarks Bar'
+    ) || roots[0] || null;
+}
+
+// "Other bookmarks" permanent folder(s). Chrome's standard ID for it is "2" on versions
+// without folderType; profiles with account bookmarks can have more than one.
+function isOtherBookmarksFolder(node) {
+    return node.folderType ? node.folderType === 'other' : node.id === '2';
+}
+
+// Build the "All bookmarks" view the way Chrome's side panel lists it: the Bookmarks bar
+// as a folder, the contents of "Other bookmarks" inline, and Mobile bookmarks if non-empty
+function buildAllBookmarksNode(tree) {
+    const roots = (tree && tree[0] && tree[0].children) || [];
+    const children = [];
+
+    flattenedFolderIds = new Set();
+    otherBookmarksId = null;
+
+    roots.forEach(node => {
+        if (isOtherBookmarksFolder(node)) {
+            flattenedFolderIds.add(node.id);
+            if (!otherBookmarksId) otherBookmarksId = node.id;
+            children.push(...(node.children || []));
+        } else if (node.id === bookmarksBarId || (node.children && node.children.length > 0)) {
+            children.push(node);
         }
+    });
+
+    return { id: ALL_BOOKMARKS_ID, title: 'All bookmarks', children };
+}
+
+// Load favorites from Chrome bookmarks with folder navigation support.
+// Always re-fetches from Chrome, so refreshes and edits are reflected immediately.
+// With no folderId, reloads the folder currently being shown.
+async function loadFavorites(folderId = null) {
+    const favoritesGrid = document.getElementById('favoritesGrid');
+
+    if (!favoritesGrid) {
+        console.error('Favorites grid element not found');
+        return;
+    }
+
+    try {
+        console.log('Loading favorites...', folderId ? `Folder: ${folderId}` : 'Current folder');
 
         // Find bookmarks bar on first load
         if (!bookmarksBarId) {
-            const bookmarkBar = bookmarks[0].children[1];
+            const bookmarkBar = findBookmarksBar(await chrome.bookmarks.getTree());
 
             if (!bookmarkBar) {
                 favoritesGrid.innerHTML = '<div class="loading">Bookmarks bar not found</div>';
@@ -174,24 +272,23 @@ async function loadFavorites(folderId = null) {
             }
 
             bookmarksBarId = bookmarkBar.id;
-            currentFolderId = bookmarkBar.id;
-            currentFolderNode = bookmarkBar;
         }
 
-        // If folderId provided, fetch that specific folder
-        if (folderId) {
-            try {
-                const folder = await chrome.bookmarks.getSubTree(folderId);
-                if (folder && folder[0]) {
-                    currentFolderId = folderId;
-                    currentFolderNode = folder[0];
-                }
-            } catch (error) {
-                console.error('Error loading folder:', error);
-                // Fall back to bookmarks bar
-                currentFolderId = bookmarksBarId;
-            }
+        const targetId = folderId || currentFolderId || ALL_BOOKMARKS_ID;
+        let folder;
+        try {
+            folder = targetId === ALL_BOOKMARKS_ID
+                ? buildAllBookmarksNode(await chrome.bookmarks.getTree())
+                : (await chrome.bookmarks.getSubTree(targetId))[0];
+        } catch (error) {
+            console.error('Error loading folder:', error);
+            // Folder was deleted or is invalid - fall back to All bookmarks
+            folder = buildAllBookmarksNode(await chrome.bookmarks.getTree());
         }
+
+        // Keep ID and node in sync so "Create Folder" targets the folder on screen
+        currentFolderId = folder.id;
+        currentFolderNode = folder;
 
         // Get children of current folder
         const children = currentFolderNode?.children || [];
@@ -224,10 +321,13 @@ async function loadFavorites(folderId = null) {
         console.log(`Loaded ${children.length} items (folders & bookmarks)`);
     } catch (error) {
         console.error('Error loading favorites:', error);
-        const favoritesGrid = document.getElementById('favoritesGrid');
-        if (favoritesGrid) {
-            favoritesGrid.innerHTML = '<div class="loading">Error loading favorites. Check permissions.</div>';
-        }
+        // Re-detect the bookmarks bar on the next load in case it changed (e.g. sign-out)
+        bookmarksBarId = null;
+        currentFolderId = null;
+        currentFolderNode = null;
+        favoritesGrid.innerHTML = '<div class="loading">Couldn\'t load favorites. Check the extension\'s bookmark permission.</div>';
+    } finally {
+        favoritesGrid.setAttribute('aria-busy', 'false');
     }
 }
 
@@ -236,6 +336,7 @@ function createFavoriteItem(bookmark) {
     const item = document.createElement('div');
     item.className = 'favorite-item favorite-bookmark';
     item.addEventListener('click', () => openUrl(bookmark.url));
+    makeActivatable(item, 'link');
 
     // Try to use favicon, fall back to initials
     const icon = document.createElement('div');
@@ -246,10 +347,7 @@ function createFavoriteItem(bookmark) {
     if (faviconUrl) {
         const img = document.createElement('img');
         img.src = faviconUrl;
-        img.alt = bookmark.title || 'Bookmark';
-        img.style.width = '100%';
-        img.style.height = '100%';
-        img.style.borderRadius = '8px';
+        img.alt = ''; // Decorative - the title is shown next to it
         // Fallback to initials if image fails to load
         img.onerror = () => {
             icon.innerHTML = '';
@@ -276,12 +374,13 @@ function createFolderItem(folder) {
     const item = document.createElement('div');
     item.className = 'favorite-item favorite-folder';
     item.addEventListener('click', () => navigateToFolder(folder.id));
+    makeActivatable(item, 'button');
 
     const icon = document.createElement('div');
     icon.className = 'favorite-icon folder-icon';
-    // Use folder emoji/icon
+    // Folder icon (sized and colored in CSS)
     icon.innerHTML = `
-        <svg viewBox="0 0 24 24" style="width: 24px; height: 24px; fill: #fbbf24;">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2h-8l-2-2z"/>
         </svg>
     `;
@@ -298,11 +397,16 @@ function createFolderItem(folder) {
 }
 
 // Get favicon URL for a bookmark
+// Uses Chrome's own favicon cache (the same icons the bookmarks bar shows), so internal
+// and signed-in sites get real icons and no hostnames are sent to a third party.
+// Requires the "favicon" permission.
 function getFaviconUrl(url) {
     try {
-        const urlObj = new URL(url);
-        // Use Google's favicon service
-        return `https://www.google.com/s2/favicons?domain=${urlObj.hostname}&sz=32`;
+        new URL(url);
+        const faviconUrl = new URL(chrome.runtime.getURL('/_favicon/'));
+        faviconUrl.searchParams.set('pageUrl', url);
+        faviconUrl.searchParams.set('size', '32');
+        return faviconUrl.toString();
     } catch (error) {
         return null;
     }
@@ -311,7 +415,9 @@ function getFaviconUrl(url) {
 // Get initials from title
 function getInitials(title) {
     if (!title) return '??';
-    return title.split(' ')
+    return title.split(/\s+/)
+        // Skip words like "-" so "Demo App - 2" becomes "DA", not "DA-2"
+        .filter(word => /^[\p{L}\p{N}]/u.test(word))
         .map(word => word[0])
         .join('')
         .substring(0, 2)
@@ -325,14 +431,16 @@ async function navigateToFolder(folderId) {
 
 // Navigate back to parent folder
 async function navigateUp() {
-    if (!currentFolderNode || !currentFolderNode.parentId) {
-        // Already at top, reload bookmarks bar
-        await loadFavorites();
+    const parentId = currentFolderNode && currentFolderNode.parentId;
+
+    // Top-level folders (and anything directly in "Other bookmarks", which is shown
+    // inline) go back to All bookmarks rather than to a folder the grid never shows
+    if (!parentId || parentId === '0' || flattenedFolderIds.has(parentId)) {
+        await loadFavorites(ALL_BOOKMARKS_ID);
         return;
     }
 
-    // Navigate to parent folder
-    await loadFavorites(currentFolderNode.parentId);
+    await loadFavorites(parentId);
 }
 
 // Render breadcrumb navigation
@@ -342,6 +450,9 @@ async function renderBreadcrumb() {
 
     container.innerHTML = '';
 
+    // Nothing to navigate back to at the top level
+    if (!currentFolderNode || currentFolderNode.id === ALL_BOOKMARKS_ID) return;
+
     // Add home/root button
     const homeBtn = document.createElement('button');
     homeBtn.className = 'breadcrumb-btn breadcrumb-home';
@@ -350,12 +461,13 @@ async function renderBreadcrumb() {
             <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
         </svg>
     `;
-    homeBtn.title = 'Back to Bookmarks Bar';
-    homeBtn.addEventListener('click', () => loadFavorites(bookmarksBarId));
+    homeBtn.title = 'Back to all bookmarks';
+    homeBtn.setAttribute('aria-label', 'Back to all bookmarks');
+    homeBtn.addEventListener('click', () => loadFavorites(ALL_BOOKMARKS_ID));
     container.appendChild(homeBtn);
 
     // Add back button if not at root
-    if (currentFolderNode && currentFolderNode.id !== bookmarksBarId) {
+    if (currentFolderNode && currentFolderNode.id !== ALL_BOOKMARKS_ID) {
         const backBtn = document.createElement('button');
         backBtn.className = 'breadcrumb-btn breadcrumb-back';
         backBtn.innerHTML = `
@@ -384,15 +496,69 @@ function openUrl(url) {
     chrome.tabs.create({ url: url });
 }
 
+// Make a clickable tile reachable with Tab and operable with Enter/Space
+function makeActivatable(element, role) {
+    element.tabIndex = 0;
+    element.setAttribute('role', role);
+    element.addEventListener('keydown', event => {
+        // Leave keys pressed on nested controls (e.g. a delete button) alone
+        if (event.target !== element) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            element.click();
+        }
+    });
+}
+
+// Show a validation or save error inside a modal instead of an alert() dialog
+function showFormError(modalId, message, input = null) {
+    const modal = document.getElementById(modalId);
+    const errorElement = modal && modal.querySelector('.form-error');
+
+    if (!errorElement) {
+        console.error(message);
+        return;
+    }
+
+    clearFormError(modalId);
+    errorElement.textContent = message;
+    errorElement.hidden = false;
+
+    if (input) {
+        input.setAttribute('aria-invalid', 'true');
+        input.focus();
+    }
+}
+
+function clearFormError(modalId) {
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+
+    const errorElement = modal.querySelector('.form-error');
+    if (errorElement) {
+        errorElement.textContent = '';
+        errorElement.hidden = true;
+    }
+    modal.querySelectorAll('[aria-invalid]').forEach(field => field.removeAttribute('aria-invalid'));
+}
+
+function focusFirstField(modal) {
+    const field = modal.querySelector('input, select');
+    if (field) setTimeout(() => field.focus(), 50);
+}
+
 // Custom button functionality
 function openAddCustomButton() {
     const modal = document.getElementById('customButtonModal');
-    if (modal) modal.style.display = 'block';
+    if (!modal) return;
+    modal.style.display = 'block';
+    focusFirstField(modal);
 }
 
 function closeModal() {
     const modal = document.getElementById('customButtonModal');
     if (modal) modal.style.display = 'none';
+    clearFormError('customButtonModal');
     
     // Clear form
     const buttonName = document.getElementById('buttonName');
@@ -432,7 +598,7 @@ async function saveCustomButton() {
     const iconInput = document.getElementById('buttonIcon');
     
     if (!nameInput || !actionSelect || !valueInput) {
-        alert('Form elements not found');
+        console.error('Form elements not found');
         return;
     }
     
@@ -442,7 +608,7 @@ async function saveCustomButton() {
     const icon = iconInput ? iconInput.value.trim() || '🔗' : '🔗';
     
     if (!name || !value) {
-        alert('Please fill in all required fields');
+        showFormError('customButtonModal', 'Enter a name and a target.', name ? valueInput : nameInput);
         return;
     }
     
@@ -480,40 +646,93 @@ async function loadCustomButtons() {
     }
 }
 
+// Jira defaults, used until the user saves settings from the Jira settings modal
+const JIRA_DEFAULTS = {
+    baseUrl: 'https://zineone.atlassian.net',
+    email: '',
+    apiToken: '',
+    jql: 'assignee = currentUser() AND statusCategory != done ORDER BY updated DESC',
+    maxResults: 50
+};
+
+// Placeholder credentials written to storage by earlier versions - treated as "not set"
+const JIRA_PLACEHOLDERS = ['EMAIL_HERE', 'API_TOKEN_HERE', 'YOUR_API_TOKEN_HERE'];
+
+// Status categories that have a matching .jira-status-* CSS class
+const JIRA_STATUS_CATEGORIES = ['new', 'indeterminate', 'done'];
+
+const JIRA_MAX_RESULTS_LIMIT = 100;
+
+// Placeholder rows shown while issues load
+const JIRA_SKELETON = '<div class="skeleton skeleton-row"></div>'.repeat(4);
+
 // Load Jira configuration
 async function loadJiraConfig() {
     try {
         const result = await chrome.storage.local.get(['jiraConfig']);
-
-        if (result.jiraConfig) {
-            jiraConfig = result.jiraConfig;
-            console.log('Jira config loaded from storage');
-            console.log(jiraConfig);
-        } else {
-            // Hardcoded default config - UPDATE THESE VALUES
-            jiraConfig = {
-                baseUrl: 'https://zineone.atlassian.net',
-                email: 'EMAIL_HERE', // TODO: ENTER YOUR EMAIL
-                apiToken: 'API_TOKEN_HERE', // TODO: ENTER YOUR API TOKEN
-                jql: 'assignee = currentUser() AND statusCategory != done ORDER BY updated DESC',
-                maxResults: 50
-            };
-
-            await chrome.storage.local.set({ jiraConfig });
-            console.log('Jira config initialized with defaults');
-        }
+        jiraConfig = { ...JIRA_DEFAULTS, ...(result.jiraConfig || {}) };
     } catch (error) {
         console.error('Error loading Jira config:', error);
+        jiraConfig = { ...JIRA_DEFAULTS };
+    }
+
+    if (JIRA_PLACEHOLDERS.includes(jiraConfig.email)) jiraConfig.email = '';
+    if (JIRA_PLACEHOLDERS.includes(jiraConfig.apiToken)) jiraConfig.apiToken = '';
+
+    // Never log the config itself - it contains the API token
+    console.log(isJiraConfigured() ? 'Jira config loaded' : 'Jira credentials not configured');
+}
+
+function isJiraConfigured() {
+    return Boolean(jiraConfig && jiraConfig.baseUrl && jiraConfig.email && jiraConfig.apiToken);
+}
+
+// Origin of a URL (e.g. https://x.atlassian.net), or null if it can't be parsed
+function getOrigin(url) {
+    try {
+        return new URL(url).origin;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Normalize user input to a Jira base URL, or return null if it isn't a valid https URL
+function normalizeJiraBaseUrl(value) {
+    let input = value.trim();
+    if (!input) return null;
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) {
+        input = `https://${input}`;
+    }
+
+    try {
+        const url = new URL(input);
+        // Basic auth sends the token with every request, so require TLS
+        if (url.protocol !== 'https:') return null;
+        // Jira Cloud's API lives at the site root; self-hosted Jira may use a context path
+        if (url.hostname.endsWith('.atlassian.net')) return url.origin;
+        return url.origin + url.pathname.replace(/\/+$/, '');
+    } catch (_) {
+        return null;
     }
 }
 
 // Fetch issues from Jira API
 async function fetchJiraIssues() {
-    if (!jiraConfig || !jiraConfig.apiToken || jiraConfig.apiToken === 'YOUR_API_TOKEN_HERE') {
-        await loadJiraConfig()
-        if (!jiraConfig || !jiraConfig.apiToken || jiraConfig.apiToken === 'YOUR_API_TOKEN_HERE') {
-            throw new Error('Jira API token not configured. Please update the credentials in the code.');
-        }
+    if (!jiraConfig) await loadJiraConfig();
+
+    if (!isJiraConfigured()) {
+        throw new Error('Jira credentials not configured. Open Jira settings to add them.');
+    }
+
+    const origin = getOrigin(jiraConfig.baseUrl);
+    if (!origin) {
+        throw new Error('Jira URL is invalid. Open Jira settings to fix it.');
+    }
+
+    // Instances other than the default need access granted from the settings modal
+    const hasAccess = await chrome.permissions.contains({ origins: [`${origin}/*`] });
+    if (!hasAccess) {
+        throw new Error(`No access to ${origin}. Open Jira settings and save to grant access.`);
     }
 
     // Use the new /search/jql endpoint (old /search is deprecated)
@@ -545,7 +764,7 @@ async function fetchJiraIssues() {
         console.error('Jira API error details:', errorText);
 
         if (response.status === 401) {
-            throw new Error('Authentication failed. Check your email and API token.');
+            throw new Error('Authentication failed. Check your email and API token in Jira settings.');
         } else if (response.status === 403) {
             throw new Error('Access denied. Check your Jira permissions.');
         } else if (response.status === 410) {
@@ -567,8 +786,16 @@ async function loadJiraIssues() {
 
     if (!container) return;
 
+    if (!jiraConfig) await loadJiraConfig();
+
+    if (!isJiraConfigured()) {
+        renderJiraSetupPrompt();
+        return;
+    }
+
     try {
-        container.innerHTML = '<div class="loading">Loading Jira issues...</div>';
+        container.innerHTML = JIRA_SKELETON;
+        container.setAttribute('aria-busy', 'true');
         if (statsContainer) statsContainer.textContent = '';
 
         console.log('Fetching Jira issues...');
@@ -587,14 +814,51 @@ async function loadJiraIssues() {
                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
                 </svg>
                 <div class="jira-error-title">Failed to load Jira issues</div>
-                <div class="jira-error-message">${error.message}</div>
+                <div class="jira-error-message"></div>
             </div>
         `;
+        // Set as text so error details can't inject markup
+        container.querySelector('.jira-error-message').textContent = error.message;
+        container.querySelector('.jira-error').appendChild(createJiraSettingsButton('Open Jira settings'));
 
         if (statsContainer) {
             statsContainer.textContent = 'Error loading data';
         }
+    } finally {
+        container.setAttribute('aria-busy', 'false');
     }
+}
+
+// Shown in place of issues until credentials are saved
+function renderJiraSetupPrompt() {
+    const container = document.getElementById('jiraContent');
+    const statsContainer = document.getElementById('jiraStats');
+
+    if (!container) return;
+
+    jiraData = [];
+    container.innerHTML = '';
+    container.setAttribute('aria-busy', 'false');
+
+    const setup = document.createElement('div');
+    setup.className = 'jira-setup';
+
+    const message = document.createElement('div');
+    message.textContent = 'Connect your Jira account to see your assigned issues.';
+
+    setup.appendChild(message);
+    setup.appendChild(createJiraSettingsButton('Configure Jira'));
+    container.appendChild(setup);
+
+    if (statsContainer) statsContainer.textContent = 'Not configured';
+}
+
+function createJiraSettingsButton(label) {
+    const button = document.createElement('button');
+    button.className = 'btn';
+    button.textContent = label;
+    button.addEventListener('click', openJiraSettingsModal);
+    return button;
 }
 
 // Render Jira issues to DOM
@@ -661,26 +925,40 @@ function renderJiraIssues() {
     });
 }
 
+// Fade the bottom edge of the issue list while more issues are hidden below
+function updateJiraScrollFade() {
+    const container = document.getElementById('jiraContent');
+    if (!container) return;
+    const hiddenBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 4;
+    container.classList.toggle('has-more', hiddenBelow);
+}
+
 // Create individual issue DOM element
 function createJiraIssueElement(issue) {
     const issueDiv = document.createElement('div');
     issueDiv.className = 'jira-issue';
     issueDiv.addEventListener('click', () => openJiraIssue(issue.key));
+    makeActivatable(issueDiv, 'link');
 
-    const statusCategory = issue.fields.status.statusCategory?.key || 'new';
+    // Only known categories are used in the class name
+    const categoryKey = issue.fields.status.statusCategory?.key;
+    const statusCategory = JIRA_STATUS_CATEGORIES.includes(categoryKey) ? categoryKey : 'new';
 
     issueDiv.innerHTML = `
-        <div class="jira-issue-key">${issue.key}</div>
+        <div class="jira-issue-key"></div>
         <div class="jira-issue-content">
-            <div class="jira-issue-title">${issue.fields.summary}</div>
-            <div class="jira-status-badge jira-status-${statusCategory}">
-                ${issue.fields.status.name}
-            </div>
+            <div class="jira-issue-title"></div>
+            <div class="jira-status-badge jira-status-${statusCategory}"></div>
         </div>
         <svg class="icon jira-arrow" viewBox="0 0 24 24">
             <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
         </svg>
     `;
+
+    // Jira fields are set as text, never parsed as HTML
+    issueDiv.querySelector('.jira-issue-key').textContent = issue.key;
+    issueDiv.querySelector('.jira-issue-title').textContent = issue.fields.summary;
+    issueDiv.querySelector('.jira-status-badge').textContent = issue.fields.status.name;
 
     return issueDiv;
 }
@@ -689,32 +967,177 @@ function createJiraIssueElement(issue) {
 function openJiraIssue(issueKey) {
     if (!issueKey || !jiraConfig) return;
 
-    const url = `${jiraConfig.baseUrl}/browse/${issueKey}`;
+    const url = `${jiraConfig.baseUrl}/browse/${encodeURIComponent(issueKey)}`;
     chrome.tabs.create({ url: url });
+}
+
+// Jira settings modal
+function getJiraSettingsInputs() {
+    const inputs = {
+        baseUrl: document.getElementById('jiraBaseUrl'),
+        email: document.getElementById('jiraEmail'),
+        apiToken: document.getElementById('jiraApiToken'),
+        jql: document.getElementById('jiraJql'),
+        maxResults: document.getElementById('jiraMaxResults')
+    };
+    return Object.values(inputs).every(Boolean) ? inputs : null;
+}
+
+function openJiraSettingsModal() {
+    const modal = document.getElementById('jiraSettingsModal');
+    const inputs = getJiraSettingsInputs();
+
+    if (!modal || !inputs) return;
+
+    const config = jiraConfig || JIRA_DEFAULTS;
+
+    inputs.baseUrl.value = config.baseUrl || '';
+    inputs.email.value = config.email || '';
+    inputs.jql.value = config.jql || JIRA_DEFAULTS.jql;
+    inputs.maxResults.value = config.maxResults || JIRA_DEFAULTS.maxResults;
+
+    // The saved token is never written back into the page; blank means "keep it"
+    inputs.apiToken.value = '';
+    inputs.apiToken.placeholder = config.apiToken
+        ? 'Saved - leave blank to keep current token'
+        : 'Paste your Jira API token';
+
+    modal.style.display = 'block';
+
+    // Focus the first field that still needs a value
+    setTimeout(() => {
+        const firstEmpty = [inputs.baseUrl, inputs.email].find(input => !input.value)
+            || (config.apiToken ? null : inputs.apiToken);
+        (firstEmpty || inputs.baseUrl).focus();
+    }, 100);
+}
+
+function closeJiraSettingsModal() {
+    const modal = document.getElementById('jiraSettingsModal');
+    if (modal) modal.style.display = 'none';
+    clearFormError('jiraSettingsModal');
+
+    // Don't leave a typed token sitting in the DOM
+    const tokenInput = document.getElementById('jiraApiToken');
+    if (tokenInput) tokenInput.value = '';
+}
+
+async function saveJiraSettings() {
+    const inputs = getJiraSettingsInputs();
+
+    if (!inputs) {
+        console.error('Form elements not found');
+        return;
+    }
+
+    // Validation runs synchronously so the permission prompt below still counts as
+    // part of the click (chrome.permissions.request requires a user gesture)
+    const baseUrl = normalizeJiraBaseUrl(inputs.baseUrl.value);
+    if (!baseUrl) {
+        showFormError('jiraSettingsModal', 'Enter a valid https:// Jira URL, e.g. https://your-domain.atlassian.net', inputs.baseUrl);
+        return;
+    }
+
+    const email = inputs.email.value.trim();
+    if (!email) {
+        showFormError('jiraSettingsModal', 'Enter the email for your Jira account.', inputs.email);
+        return;
+    }
+
+    // A blank token keeps the saved one, but only for the same Jira instance,
+    // so a token is never sent to a new host without being re-entered
+    const origin = getOrigin(baseUrl);
+    const canKeepToken = Boolean(jiraConfig && jiraConfig.apiToken && getOrigin(jiraConfig.baseUrl) === origin);
+    const apiToken = inputs.apiToken.value.trim() || (canKeepToken ? jiraConfig.apiToken : '');
+    if (!apiToken) {
+        showFormError('jiraSettingsModal', 'Enter your Jira API token.', inputs.apiToken);
+        return;
+    }
+
+    const jql = inputs.jql.value.trim() || JIRA_DEFAULTS.jql;
+
+    const maxResultsText = inputs.maxResults.value.trim();
+    const maxResults = maxResultsText ? Number(maxResultsText) : JIRA_DEFAULTS.maxResults;
+    if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > JIRA_MAX_RESULTS_LIMIT) {
+        showFormError('jiraSettingsModal', `Max results must be a whole number from 1 to ${JIRA_MAX_RESULTS_LIMIT}.`, inputs.maxResults);
+        return;
+    }
+
+    // Resolves immediately without a prompt if access is already granted
+    let granted = false;
+    try {
+        granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
+    } catch (error) {
+        console.error('Error requesting Jira host permission:', error);
+    }
+
+    if (!granted) {
+        showFormError('jiraSettingsModal', `Chrome access to ${origin} is needed to load issues. Save again and choose Allow.`);
+        return;
+    }
+
+    const newConfig = { baseUrl, email, apiToken, jql, maxResults };
+
+    try {
+        await chrome.storage.local.set({ jiraConfig: newConfig });
+    } catch (error) {
+        console.error('Error saving Jira settings:', error);
+        showFormError('jiraSettingsModal', 'Couldn\'t save Jira settings. Try again.');
+        return;
+    }
+
+    jiraConfig = newConfig;
+    console.log('Jira settings saved');
+
+    closeJiraSettingsModal();
+    await loadJiraIssues();
+}
+
+// Remove the saved email and token, keeping URL/JQL preferences
+async function clearJiraSettings() {
+    if (!confirm('Remove the saved Jira email and API token from this browser?')) return;
+
+    const clearedConfig = { ...(jiraConfig || JIRA_DEFAULTS), email: '', apiToken: '' };
+
+    try {
+        await chrome.storage.local.set({ jiraConfig: clearedConfig });
+    } catch (error) {
+        console.error('Error clearing Jira settings:', error);
+        showFormError('jiraSettingsModal', 'Couldn\'t clear Jira credentials. Try again.');
+        return;
+    }
+
+    jiraConfig = clearedConfig;
+    console.log('Jira credentials cleared');
+
+    closeJiraSettingsModal();
+    await loadJiraIssues();
 }
 
 function renderCustomButtons() {
     const container = document.getElementById('customButtonsGrid');
-    const card = document.getElementById('customButtonsCard');
-    
-    if (!container || !card) return;
-    
+
+    if (!container) return;
+
+    // The card stays visible even when empty so its "+" button can add the first one
     if (customButtons.length === 0) {
-        card.style.display = 'none';
+        container.innerHTML = '<div class="loading">No shortcuts yet. Use + to add links, Chrome pages or searches you open often.</div>';
         return;
     }
-    
-    card.style.display = 'block';
+
     container.innerHTML = '';
     
     customButtons.forEach(button => {
         const buttonElement = document.createElement('div');
         buttonElement.className = 'custom-button';
         buttonElement.addEventListener('click', () => executeCustomButtonAction(button));
+        makeActivatable(buttonElement, 'button');
         
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'delete-custom-btn';
         deleteBtn.textContent = '×';
+        deleteBtn.title = 'Remove shortcut';
+        deleteBtn.setAttribute('aria-label', `Remove ${button.name}`);
         deleteBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             deleteCustomButton(button.id);
@@ -773,12 +1196,15 @@ async function deleteCustomButton(buttonId) {
 // Add favorite functionality
 function openAddFavoriteModal() {
     const modal = document.getElementById('addFavoriteModal');
-    if (modal) modal.style.display = 'block';
+    if (!modal) return;
+    modal.style.display = 'block';
+    focusFirstField(modal);
 }
 
 function closeFavoriteModal() {
     const modal = document.getElementById('addFavoriteModal');
     if (modal) modal.style.display = 'none';
+    clearFormError('addFavoriteModal');
 
     // Clear form
     const titleInput = document.getElementById('favoriteTitle');
@@ -802,7 +1228,7 @@ function openCreateFolderModal() {
         if (currentFolderNode && currentFolderNode.title) {
             locationDisplay.textContent = currentFolderNode.title;
         } else {
-            locationDisplay.textContent = 'Bookmarks Bar';
+            locationDisplay.textContent = 'All bookmarks';
         }
     }
 
@@ -817,6 +1243,7 @@ function openCreateFolderModal() {
 function closeFolderModal() {
     const modal = document.getElementById('createFolderModal');
     if (modal) modal.style.display = 'none';
+    clearFormError('createFolderModal');
 
     // Clear form
     const folderNameInput = document.getElementById('folderName');
@@ -832,7 +1259,7 @@ async function createFolder() {
     const folderNameInput = document.getElementById('folderName');
 
     if (!folderNameInput) {
-        alert('Form elements not found');
+        console.error('Form elements not found');
         return;
     }
 
@@ -840,14 +1267,13 @@ async function createFolder() {
 
     // Validation: Check for empty folder name
     if (!folderName) {
-        alert('Please enter a folder name');
-        folderNameInput.focus();
+        showFormError('createFolderModal', 'Enter a folder name.', folderNameInput);
         return;
     }
 
     // Validation: Check for reasonable length (Chrome limit is 255 chars)
     if (folderName.length > 255) {
-        alert('Folder name is too long (maximum 255 characters)');
+        showFormError('createFolderModal', 'Folder names can be at most 255 characters.', folderNameInput);
         return;
     }
 
@@ -855,10 +1281,13 @@ async function createFolder() {
         // Determine parent folder ID
         // If we're viewing a specific folder, create inside it
         // Otherwise, create in bookmarks bar
-        const parentId = currentFolderId || bookmarksBarId;
+        // All bookmarks is virtual - new folders there go into "Other bookmarks", as in Chrome
+        const parentId = currentFolderId === ALL_BOOKMARKS_ID || !currentFolderId
+            ? (otherBookmarksId || bookmarksBarId)
+            : currentFolderId;
 
         if (!parentId) {
-            alert('Cannot determine parent folder. Please refresh and try again.');
+            showFormError('createFolderModal', 'Couldn\'t find the folder to create this in. Refresh and try again.');
             return;
         }
 
@@ -888,11 +1317,11 @@ async function createFolder() {
 
         // Provide user-friendly error messages
         if (error.message.includes('permission')) {
-            alert('Permission denied. Please check extension permissions.');
+            showFormError('createFolderModal', 'Permission denied. Check the extension\'s bookmark permission.');
         } else if (error.message.includes('not found')) {
-            alert('Parent folder not found. Please refresh and try again.');
+            showFormError('createFolderModal', 'That folder no longer exists. Refresh and try again.');
         } else {
-            alert(`Error creating folder: ${error.message}`);
+            showFormError('createFolderModal', `Couldn't create the folder: ${error.message}`);
         }
     }
 }
@@ -903,7 +1332,7 @@ async function saveFavorite() {
     const positionSelect = document.getElementById('favoritePosition');
     
     if (!titleInput || !urlInput || !positionSelect) {
-        alert('Form elements not found');
+        console.error('Form elements not found');
         return;
     }
     
@@ -912,33 +1341,28 @@ async function saveFavorite() {
     const position = positionSelect.value;
     
     if (!title || !url) {
-        alert('Please fill in both title and URL');
+        showFormError('addFavoriteModal', 'Enter a title and a URL.', title ? urlInput : titleInput);
         return;
     }
     
     // Validate URL format
     if (!isValidUrl(url)) {
-        alert('Please enter a valid URL (e.g., https://example.com)');
+        showFormError('addFavoriteModal', 'Enter a full URL, including https://', urlInput);
         return;
     }
     
     try {
-        // Get bookmarks bar folder with improved detection
-        const bookmarks = await chrome.bookmarks.getTree();
-        const bookmarkBar = bookmarks[0].children.find(child => 
-            child.title === 'Bookmarks bar' || 
-            child.title === 'Bookmarks Bar' ||
-            child.folderType === 'bookmarks-bar'
-        );
-        
-        if (!bookmarkBar) {
-            alert('Bookmarks bar not found');
+        // Use the same bookmarks bar the favorites grid displays
+        const barId = bookmarksBarId || findBookmarksBar(await chrome.bookmarks.getTree())?.id;
+
+        if (!barId) {
+            showFormError('addFavoriteModal', 'Couldn\'t find the bookmarks bar.');
             return;
         }
-        
+
         // Create new bookmark
         const newBookmark = {
-            parentId: bookmarkBar.id,
+            parentId: barId,
             title: title,
             url: url
         };
@@ -953,12 +1377,12 @@ async function saveFavorite() {
         console.log('Favorite added successfully');
         closeFavoriteModal();
         
-        // Refresh favorites display
-        await loadFavorites();
+        // Show the bookmarks bar so the new favorite is visible
+        await loadFavorites(barId);
         
     } catch (error) {
         console.error('Error adding favorite:', error);
-        alert('Error adding favorite. Please try again.');
+        showFormError('addFavoriteModal', 'Couldn\'t add the favorite. Try again.');
     }
 }
 
@@ -979,8 +1403,9 @@ function performSearch() {
     const query = searchInput.value.trim();
     if (!query) return;
     
-    // Base URL for Google search
-    const baseURL = 'https://zineone.atlassian.net/browse/ZMOB-';
+    // Jira ticket URL on the configured instance
+    const jiraBaseUrl = (jiraConfig && jiraConfig.baseUrl) || JIRA_DEFAULTS.baseUrl;
+    const baseURL = `${jiraBaseUrl}/browse/ZMOB-`;
     
     // Encode the search query to handle spaces and special characters
     const encodedQuery = encodeURIComponent(query);
