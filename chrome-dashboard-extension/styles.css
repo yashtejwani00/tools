@@ -12,6 +12,7 @@
     --surface-hover: #20262f;
     --inset: #0f1318;
     --tile: rgba(255, 255, 255, 0.025);
+    --icon-bg: rgba(255, 255, 255, 0.05);
     --line: rgba(214, 228, 240, 0.07);
     --line-strong: rgba(214, 228, 240, 0.13);
     --line-hover: rgba(214, 228, 240, 0.2);
@@ -42,6 +43,7 @@
     --radius-md: 12px;
     --radius-sm: 8px;
     --radius-xs: 5px;
+    --radius-pill: 999px;
 
     --shadow-modal: 0 24px 64px -16px rgba(2, 6, 12, 0.75), 0 2px 8px rgba(2, 6, 12, 0.4);
     --edge-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.035);
@@ -368,8 +370,8 @@ button {
     width: 28px;
     height: 28px;
     flex-shrink: 0;
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.05);
+    border-radius: var(--radius-sm);
+    background: var(--icon-bg);
     color: var(--text-muted);
     font-size: 0.72rem;
     font-weight: 600;
@@ -379,7 +381,7 @@ button {
 .row-icon svg {
     width: 16px;
     height: 16px;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     fill: currentColor;
 }
 
@@ -851,7 +853,7 @@ button {
     padding: 0 0.75rem;
     background: transparent;
     border: 1px solid var(--line);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     color: var(--text-muted);
     font-size: 0.78rem;
     font-weight: 500;

@@ -34,6 +34,12 @@ document.addEventListener('DOMContentLoaded', function() {
     loadFavorites();
     loadCustomButtons();
     loadRecentlyClosed();
+    // Keep "5m ago" labels current on a dashboard left open
+    setInterval(() => {
+        document.querySelectorAll('.recent-time').forEach(time => {
+            time.textContent = timeAgo(Number(time.dataset.closedAt));
+        });
+    }, 60 * 1000);
     // Issues need the stored config, so wait for it before fetching
     loadJiraConfig().then(loadJiraIssues);
     setupEventListeners();
@@ -811,15 +817,17 @@ function getJiraViews() {
     return parseJiraViews((jiraConfig && jiraConfig.jql) || JIRA_DEFAULTS.jql);
 }
 
-// "Name | JQL" per line; a line without "|" is JQL only (settings saved before views existed)
+// "Name | JQL" per line; any other line is JQL only (settings saved before views existed).
+// A name can't contain quotes, parentheses or operators, so a "|" inside JQL like
+// text ~ "a|b" isn't mistaken for the separator.
 function parseJiraViews(text) {
     return text.split('\n')
         .map(line => line.trim())
         .filter(Boolean)
         .map((line, index) => {
-            const bar = line.indexOf('|');
-            return bar > 0
-                ? { name: line.slice(0, bar).trim(), jql: line.slice(bar + 1).trim() }
+            const named = line.match(/^([^|"'=~<>!()]+)\|(.*)$/);
+            return named
+                ? { name: named[1].trim(), jql: named[2].trim() }
                 : { name: index === 0 ? 'Mine' : `View ${index + 1}`, jql: line };
         })
         .filter(view => view.jql);
@@ -990,9 +998,10 @@ function renderJiraIssues() {
         const statusParts = Object.entries(statusCounts)
             .map(([status, count]) => `${count} ${status}`)
             .join(', ');
-        const updatedCount = sortedIssues.filter(isJiraIssueUpdated).length;
-        const updatedText = updatedCount ? ` · ${updatedCount} updated` : '';
-        statsContainer.textContent = `${statsText} (${statusParts})${updatedText}`;
+        statsContainer.textContent = `${statsText} (${statusParts})`;
+        const updatedCounter = document.createElement('span');
+        updatedCounter.id = 'jiraUpdatedCount';
+        statsContainer.appendChild(updatedCounter);
     }
 
     // Render issues
@@ -1002,6 +1011,14 @@ function renderJiraIssues() {
         const issueElement = createJiraIssueElement(issue);
         container.appendChild(issueElement);
     });
+    updateJiraUpdatedCount();
+}
+
+// " · N updated" in the stats line, counted from the rendered issues
+function updateJiraUpdatedCount() {
+    const counter = document.getElementById('jiraUpdatedCount');
+    const count = document.querySelectorAll('.jira-issue.is-updated').length;
+    if (counter) counter.textContent = count ? ` · ${count} updated` : '';
 }
 
 // Fade the bottom edge of the issue list while more issues are hidden below
@@ -1016,6 +1033,7 @@ function updateJiraScrollFade() {
 function createJiraIssueElement(issue) {
     const issueDiv = document.createElement('div');
     issueDiv.className = 'jira-issue';
+    issueDiv.dataset.key = issue.key;
     issueDiv.addEventListener('click', () => openJiraIssue(issue.key));
     makeActivatable(issueDiv, 'link');
 
@@ -1064,10 +1082,29 @@ function isJiraIssueUpdated(issue) {
 
 // ponytail: compares Jira's server clock to this machine's; a few seconds of skew can
 // leave your own change flagged. Store the issue's `updated` instead if that shows up.
-function markJiraSeen(issueKey) {
-    jiraSeen.keys[issueKey] = Date.now();
-    chrome.storage.local.set({ jiraSeen }).catch(error => console.error('Error saving Jira seen state:', error));
-    if (jiraData.some(issue => issue.key === issueKey)) renderJiraIssues();
+async function markJiraSeen(issueKey) {
+    const seenAt = Date.now();
+    jiraSeen.keys[issueKey] = seenAt;
+
+    // Clear the dot in place, so the list keeps its scroll position and focus
+    const item = document.querySelector(`.jira-issue[data-key="${CSS.escape(issueKey)}"]`);
+    if (item && item.classList.contains('is-updated')) {
+        item.classList.remove('is-updated');
+        item.querySelector('.visually-hidden')?.remove();
+        updateJiraUpdatedCount();
+    }
+
+    try {
+        // Other dashboard tabs save here too: merge into the stored copy instead of overwriting it
+        const { jiraSeen: stored } = await chrome.storage.local.get(['jiraSeen']);
+        jiraSeen = {
+            since: stored ? stored.since : jiraSeen.since,
+            keys: { ...(stored ? stored.keys : jiraSeen.keys), [issueKey]: seenAt }
+        };
+        await chrome.storage.local.set({ jiraSeen });
+    } catch (error) {
+        console.error('Error saving Jira seen state:', error);
+    }
 }
 
 // Open Jira issue in new tab
@@ -1147,11 +1184,13 @@ async function applyTransition(issue, transition, menu, option) {
             method: 'POST',
             body: { transition: { id: transition.id } }
         });
-        menu.hidePopover();
+        // The menu may have been reopened for another issue while this was in flight
+        if (menu.dataset.issueKey === issue.key) menu.hidePopover();
         markJiraSeen(issue.key); // Your own change isn't news
         await loadJiraIssues();
     } catch (error) {
         console.error('Error changing Jira status:', error);
+        if (menu.dataset.issueKey !== issue.key) return;
         menu.querySelectorAll('.transition-option').forEach(other => { other.disabled = false; });
         option.focus(); // Disabling it dropped focus out of the menu
         // Usually a transition that needs a screen (e.g. resolution) - Jira's message says which field
@@ -1627,9 +1666,19 @@ function setupSearch() {
     const submit = document.getElementById('searchSubmit');
     if (!input) return;
 
-    input.addEventListener('input', updateSearchResults);
+    // Short pause before querying tabs/bookmarks, so fast typing doesn't query per keystroke.
+    // Enter doesn't wait for it: runSelectedSearchResult rebuilds if results are behind.
+    let debounceTimer = null;
+    input.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(updateSearchResults, 80);
+    });
     input.addEventListener('focus', updateSearchResults);
     input.addEventListener('blur', () => setSearchListOpen(false));
+
+    // Keep focus in the input when clicking anywhere in the list (results, padding, scrollbar),
+    // so blur doesn't close it before the click lands
+    document.getElementById('searchResults').addEventListener('mousedown', event => event.preventDefault());
 
     input.addEventListener('keydown', event => {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -1758,8 +1807,6 @@ function renderSearchResults() {
         item.id = `search-result-${index}`;
         item.className = 'search-result';
         item.setAttribute('role', 'option');
-        // Keep focus in the input so blur doesn't close the list before the click lands
-        item.addEventListener('mousedown', event => event.preventDefault());
         item.addEventListener('click', () => runSearchResult(result));
 
         const icon = document.createElement('span');
@@ -1814,8 +1861,11 @@ function setSearchListOpen(open) {
 
 async function runSelectedSearchResult() {
     const input = document.getElementById('mainSearchInput');
+    const query = input.value.trim();
     // Enter can beat the async results for what was just typed
-    if (searchResultsQuery !== input.value.trim()) await updateSearchResults();
+    if (searchResultsQuery !== query) await updateSearchResults();
+    // A newer rebuild superseded that one, so these results may be for an older query
+    if (searchResultsQuery !== query) return;
     const result = searchResults[searchSelected];
     if (result) runSearchResult(result);
 }
@@ -1839,9 +1889,12 @@ async function switchToTab(tab) {
         openUrl(tab.url);
         return;
     }
-    // Like Chrome's "Switch to this tab": don't leave this blank new tab behind
+    // Like Chrome's "Switch to this tab": don't leave a blank new tab behind. A pinned
+    // dashboard, or one with back/forward history, is being kept on purpose
     const current = await chrome.tabs.getCurrent();
-    if (current && current.id !== tab.id) chrome.tabs.remove(current.id);
+    if (current && current.id !== tab.id && !current.pinned && history.length <= 1) {
+        chrome.tabs.remove(current.id);
+    }
 }
 
 // ==========================================================================
@@ -1909,6 +1962,7 @@ function createRecentItem(session) {
 
     const time = document.createElement('span');
     time.className = 'recent-time';
+    time.dataset.closedAt = session.lastModified;
     time.textContent = timeAgo(session.lastModified);
 
     item.append(icon, title, time);

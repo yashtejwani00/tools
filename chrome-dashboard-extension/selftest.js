@@ -27,6 +27,9 @@ assert.deepStrictEqual(views('Mine | a = 1\n\n  Team | b = 2 OR c = 3  \nd = 4')
     { name: 'View 3', jql: 'd = 4' }
 ]);
 assert.deepStrictEqual(views('Empty |'), []);
+// A "|" inside legacy, unnamed JQL is not a name separator
+assert.deepStrictEqual(views('text ~ "crash|anr" ORDER BY updated DESC'), [{ name: 'Mine', jql: 'text ~ "crash|anr" ORDER BY updated DESC' }]);
+assert.deepStrictEqual(views('Crashes | text ~ "crash|anr"'), [{ name: 'Crashes', jql: 'text ~ "crash|anr"' }]);
 
 const now = Date.now() / 1000;
 assert.strictEqual(timeAgo(now - 10), 'just now');
