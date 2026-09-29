@@ -176,6 +176,7 @@
             </div>
             <p class="form-error" role="alert" hidden></p>
             <div class="modal-buttons">
+                <button class="btn btn-danger" id="deleteButton" hidden>Delete</button>
                 <button class="btn" id="cancelButton">Cancel</button>
                 <button class="btn btn-primary" id="saveButton">Save</button>
             </div>
@@ -197,6 +198,31 @@
             <div class="modal-buttons">
                 <button class="btn" id="cancelFolder">Cancel</button>
                 <button class="btn btn-primary" id="saveFolder">Create folder</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for editing, moving and deleting a bookmark or folder -->
+    <div class="modal" id="editBookmarkModal" role="dialog" aria-modal="true" aria-labelledby="editBookmarkTitle">
+        <div class="modal-content">
+            <h3 id="editBookmarkTitle">Edit bookmark</h3>
+            <div class="form-group">
+                <label for="editBookmarkName">Name</label>
+                <input type="text" id="editBookmarkName" maxlength="255">
+            </div>
+            <div class="form-group" id="editBookmarkUrlGroup">
+                <label for="editBookmarkUrl">URL</label>
+                <input type="text" id="editBookmarkUrl" placeholder="https://example.com">
+            </div>
+            <div class="form-group">
+                <label for="editBookmarkFolder">Folder</label>
+                <select id="editBookmarkFolder"></select>
+            </div>
+            <p class="form-error" role="alert" hidden></p>
+            <div class="modal-buttons">
+                <button class="btn btn-danger" id="deleteBookmark">Delete</button>
+                <button class="btn" id="cancelEditBookmark">Cancel</button>
+                <button class="btn btn-primary" id="saveEditBookmark">Save</button>
             </div>
         </div>
     </div>
@@ -235,6 +261,12 @@
                 <button class="btn btn-primary" id="saveJiraSettings">Save</button>
             </div>
         </div>
+    </div>
+
+    <!-- Status message with optional Undo, e.g. after deleting -->
+    <div class="toast" id="toast" role="status" hidden>
+        <span id="toastMessage"></span>
+        <button class="toast-action" id="toastUndo">Undo</button>
     </div>
 
     <script src="script.js"></script>

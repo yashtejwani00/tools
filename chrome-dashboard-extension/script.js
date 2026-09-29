@@ -15,6 +15,19 @@ let flattenedFolderIds = new Set(); // "Other bookmarks" folders, shown inline u
 // Virtual top-level folder mirroring Chrome's "All Bookmarks" side panel
 const ALL_BOOKMARKS_ID = 'all-bookmarks';
 
+// Editing state
+let editingBookmark = null; // Bookmark/folder node open in the edit modal
+let editingButtonId = null; // Shortcut open in the shortcut modal (null when adding)
+
+// Drag and drop: { kind: 'favorite', node } or { kind: 'shortcut', button } while dragging
+let dragSource = null;
+let dropIndicator = null; // { element, className } of the highlighted drop target
+
+// Toast state
+let toastTimer = null;
+let toastUndo = null;
+const TOAST_DURATION_MS = 6000;
+
 // Initialize extension
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Chrome Dashboard Extension loaded');
@@ -79,14 +92,42 @@ function setupEventListeners() {
 
     // Custom button modal
     const addCustomBtn = document.getElementById('addCustomButton');
-    if (addCustomBtn) addCustomBtn.addEventListener('click', openAddCustomButton);
-    
+    // Wrapped so the click event isn't passed in as the shortcut to edit
+    if (addCustomBtn) addCustomBtn.addEventListener('click', () => openCustomButtonModal());
+
     const cancelBtn = document.getElementById('cancelButton');
     if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
-    
+
     const saveBtn = document.getElementById('saveButton');
     if (saveBtn) saveBtn.addEventListener('click', saveCustomButton);
-    
+
+    const deleteBtn = document.getElementById('deleteButton');
+    if (deleteBtn) deleteBtn.addEventListener('click', deleteCustomButton);
+
+    // Edit bookmark/folder modal
+    const cancelEditBookmarkBtn = document.getElementById('cancelEditBookmark');
+    if (cancelEditBookmarkBtn) cancelEditBookmarkBtn.addEventListener('click', closeEditBookmarkModal);
+
+    const saveEditBookmarkBtn = document.getElementById('saveEditBookmark');
+    if (saveEditBookmarkBtn) saveEditBookmarkBtn.addEventListener('click', saveEditBookmark);
+
+    const deleteBookmarkBtn = document.getElementById('deleteBookmark');
+    if (deleteBookmarkBtn) deleteBookmarkBtn.addEventListener('click', deleteEditingBookmark);
+
+    const toastUndoBtn = document.getElementById('toastUndo');
+    if (toastUndoBtn) {
+        toastUndoBtn.addEventListener('click', async () => {
+            const undo = toastUndo;
+            hideToast();
+            try {
+                if (undo) await undo();
+            } catch (error) {
+                console.error('Undo failed:', error);
+                showToast(`Couldn't undo: ${error.message}`);
+            }
+        });
+    }
+
     // Add favorite modal
     const cancelFavBtn = document.getElementById('cancelFavorite');
     if (cancelFavBtn) cancelFavBtn.addEventListener('click', closeFavoriteModal);
@@ -105,43 +146,6 @@ function setupEventListeners() {
     const actionSelect = document.getElementById('buttonAction');
     if (actionSelect) actionSelect.addEventListener('change', updateActionPlaceholder);
     
-    // Close modals when clicking outside
-    const customModal = document.getElementById('customButtonModal');
-    if (customModal) {
-        customModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeModal();
-            }
-        });
-    }
-    
-    const favoriteModal = document.getElementById('addFavoriteModal');
-    if (favoriteModal) {
-        favoriteModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeFavoriteModal();
-            }
-        });
-    }
-
-    const folderModal = document.getElementById('createFolderModal');
-    if (folderModal) {
-        folderModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeFolderModal();
-            }
-        });
-    }
-
-    const jiraModal = document.getElementById('jiraSettingsModal');
-    if (jiraModal) {
-        jiraModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeJiraSettingsModal();
-            }
-        });
-    }
-
     // Issue list fade: recheck on scroll, resize, and whenever its content is replaced
     const jiraContent = document.getElementById('jiraContent');
     if (jiraContent) {
@@ -150,13 +154,23 @@ function setupEventListeners() {
         new MutationObserver(updateJiraScrollFade).observe(jiraContent, { childList: true });
     }
 
-    // Keyboard: Escape closes the open modal, Enter in a field submits it
+    // Every modal and its close function: clicking outside or pressing Escape closes it,
+    // Enter in a field submits it
     const modalClosers = {
         addFavoriteModal: closeFavoriteModal,
         customButtonModal: closeModal,
         createFolderModal: closeFolderModal,
+        editBookmarkModal: closeEditBookmarkModal,
         jiraSettingsModal: closeJiraSettingsModal
     };
+
+    Object.entries(modalClosers).forEach(([id, close]) => {
+        const modal = document.getElementById(id);
+        if (!modal) return;
+        modal.addEventListener('click', event => {
+            if (event.target === modal) close();
+        });
+    });
 
     document.addEventListener('keydown', function(event) {
         const openModalId = Object.keys(modalClosers).find(id => {
@@ -178,6 +192,27 @@ function setupEventListeners() {
     document.querySelectorAll('.modal input, .modal select').forEach(field => {
         field.addEventListener('input', () => field.removeAttribute('aria-invalid'));
     });
+
+    // Other new tab pages and Chrome's bookmark manager change the same data. Reload on
+    // their changes so this page never acts on (or saves back) a stale copy. This page's
+    // own bookmark edits arrive here too, so they don't reload the grid themselves.
+    ['onCreated', 'onRemoved', 'onChanged', 'onMoved'].forEach(name => {
+        chrome.bookmarks[name].addListener(scheduleFavoritesReload);
+    });
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.customButtons) {
+            customButtons = changes.customButtons.newValue || [];
+            renderCustomButtons();
+        }
+    });
+}
+
+// Bookmark events come in bursts (e.g. deleting a folder, sync), so reload once they settle
+let favoritesReloadTimer = null;
+function scheduleFavoritesReload() {
+    clearTimeout(favoritesReloadTimer);
+    favoritesReloadTimer = setTimeout(() => loadFavorites(), 100);
 }
 
 // Update time display
@@ -348,6 +383,7 @@ function createFavoriteItem(bookmark) {
         const img = document.createElement('img');
         img.src = faviconUrl;
         img.alt = ''; // Decorative - the title is shown next to it
+        img.draggable = false; // Drag the whole tile, not the icon
         // Fallback to initials if image fails to load
         img.onerror = () => {
             icon.innerHTML = '';
@@ -366,7 +402,7 @@ function createFavoriteItem(bookmark) {
     item.appendChild(icon);
     item.appendChild(title);
 
-    return item;
+    return setupFavoriteTile(item, bookmark);
 }
 
 // Create folder item element
@@ -393,7 +429,54 @@ function createFolderItem(folder) {
     item.appendChild(icon);
     item.appendChild(title);
 
-    return item;
+    return setupFavoriteTile(item, folder);
+}
+
+// Chrome's top-level folders (Bookmarks bar, Other, Mobile) and policy-managed
+// bookmarks can't be renamed, moved or deleted
+function isEditableNode(node) {
+    return node.parentId !== '0' && !node.unmodifiable;
+}
+
+// Wraps a favorites tile with its edit button and drag and drop; returns the wrapper
+function setupFavoriteTile(tile, node) {
+    const cell = createTileCell(tile);
+
+    if (isEditableNode(node)) {
+        cell.appendChild(createEditButton(`Edit ${node.title || 'folder'}`, () => openEditBookmarkModal(node)));
+        enableDrag(cell, { kind: 'favorite', node });
+    }
+
+    enableDrop(cell, event => favoriteDropPosition(event, cell, node), (source, position) => {
+        // index is a position among the target's current siblings; Chrome adjusts
+        // for the moved node's own removal when it stays in the same folder
+        moveBookmark(source.node, position === 'into'
+            ? { parentId: node.id }
+            : { parentId: node.parentId, index: node.index + (position === 'after' ? 1 : 0) });
+    });
+
+    return cell;
+}
+
+// Dropping on a folder's middle moves into it; a tile's left or right edge reorders
+function favoriteDropPosition(event, element, target) {
+    const dragged = dragSource.kind === 'favorite' && dragSource.node;
+    if (!dragged || dragged.id === target.id || target.unmodifiable) return null;
+
+    const x = pointerFraction(event, element);
+    const isFolder = !target.url;
+    // Top-level folders can't have siblings, so all of their tile means "into"
+    if (isFolder && (target.parentId === '0' || (x > 0.25 && x < 0.75))) return 'into';
+    return x < 0.5 ? 'before' : 'after';
+}
+
+async function moveBookmark(node, destination) {
+    try {
+        await chrome.bookmarks.move(node.id, destination);
+    } catch (error) {
+        console.error('Error moving bookmark:', error);
+        showToast(`Couldn't move "${node.title}": ${error.message}`);
+    }
 }
 
 // Get favicon URL for a bookmark
@@ -480,6 +563,13 @@ async function renderBreadcrumb() {
         backBtn.addEventListener('click', navigateUp);
         container.appendChild(backBtn);
 
+        // Dropping a tile on Back moves it up a level. Above a top-level folder is
+        // All bookmarks, whose loose items live in Other bookmarks.
+        const upId = currentFolderNode.parentId === '0' ? otherBookmarksId : currentFolderNode.parentId;
+        enableDrop(backBtn,
+            () => (dragSource.kind === 'favorite' && upId ? 'into' : null),
+            source => moveBookmark(source.node, { parentId: upId }));
+
         // Show current folder name
         if (currentFolderNode.title) {
             const folderName = document.createElement('span');
@@ -508,6 +598,112 @@ function makeActivatable(element, role) {
             element.click();
         }
     });
+}
+
+// A tile plus room for its edit button. The button sits next to the tile, not inside it:
+// assistive tech treats the contents of a role="button" tile as plain text, which would hide it.
+function createTileCell(tile) {
+    const cell = document.createElement('div');
+    cell.className = 'tile-cell';
+    cell.appendChild(tile);
+    return cell;
+}
+
+// Pencil button shown when its tile cell is hovered or focused
+function createEditButton(label, onClick) {
+    const button = document.createElement('button');
+    button.className = 'tile-edit-btn';
+    button.title = 'Edit';
+    button.setAttribute('aria-label', label);
+    button.innerHTML = `
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+        </svg>
+    `;
+    button.addEventListener('click', onClick);
+    return button;
+}
+
+// Drag and drop. Mouse only - keyboard users move bookmarks with the edit modal's Folder field.
+function enableDrag(element, source) {
+    element.draggable = true;
+    element.addEventListener('dragstart', event => {
+        dragSource = source;
+        event.dataTransfer.effectAllowed = 'move';
+        element.classList.add('dragging');
+    });
+    element.addEventListener('dragend', () => {
+        dragSource = null;
+        element.classList.remove('dragging');
+        clearDropIndicators();
+    });
+}
+
+// getPosition(event) returns 'before', 'after' or 'into', or null where a drop isn't allowed.
+// It's only called while one of our tiles is being dragged.
+function enableDrop(element, getPosition, onDrop) {
+    element.addEventListener('dragover', event => {
+        const position = dragSource && getPosition(event);
+        if (!position) return;
+        event.preventDefault(); // Allows the drop
+        event.dataTransfer.dropEffect = 'move';
+        showDropIndicator(element, `drop-${position}`);
+    });
+    element.addEventListener('dragleave', event => {
+        if (dropIndicator?.element === element && !element.contains(event.relatedTarget)) {
+            clearDropIndicators();
+        }
+    });
+    element.addEventListener('drop', event => {
+        const source = dragSource;
+        const position = source && getPosition(event);
+        clearDropIndicators();
+        if (!position) return;
+        event.preventDefault();
+        onDrop(source, position);
+    });
+}
+
+// dragover fires continuously, so only touch the DOM when the highlight actually changes
+function showDropIndicator(element, className) {
+    if (dropIndicator?.element === element && dropIndicator.className === className) return;
+    clearDropIndicators();
+    element.classList.add(className);
+    dropIndicator = { element, className };
+}
+
+function clearDropIndicators() {
+    if (dropIndicator) dropIndicator.element.classList.remove(dropIndicator.className);
+    dropIndicator = null;
+}
+
+// Horizontal pointer position over an element: 0 at its left edge, 1 at its right
+function pointerFraction(event, element) {
+    const rect = element.getBoundingClientRect();
+    return (event.clientX - rect.left) / rect.width;
+}
+
+// Brief message at the bottom of the page, with an Undo button when undo is given.
+// A new toast replaces the current one.
+function showToast(message, undo = null) {
+    const toast = document.getElementById('toast');
+    const undoButton = document.getElementById('toastUndo');
+    if (!toast || !undoButton) return;
+
+    document.getElementById('toastMessage').textContent = message;
+    undoButton.hidden = !undo;
+    toastUndo = undo;
+    toast.hidden = false;
+
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, TOAST_DURATION_MS);
+}
+
+function hideToast() {
+    const toast = document.getElementById('toast');
+    if (toast) toast.hidden = true;
+    toastUndo = null;
+    clearTimeout(toastTimer);
 }
 
 // Show a validation or save error inside a modal instead of an alert() dialog
@@ -548,9 +744,23 @@ function focusFirstField(modal) {
 }
 
 // Custom button functionality
-function openAddCustomButton() {
+// Opens the shortcut modal to add a new shortcut, or to edit/delete the one given
+function openCustomButtonModal(button = null) {
     const modal = document.getElementById('customButtonModal');
     if (!modal) return;
+
+    editingButtonId = button ? button.id : null;
+    document.getElementById('customButtonTitle').textContent = button ? 'Edit shortcut' : 'Add shortcut';
+    document.getElementById('deleteButton').hidden = !button;
+
+    if (button) {
+        document.getElementById('buttonName').value = button.name;
+        document.getElementById('buttonAction').value = button.action;
+        document.getElementById('buttonValue').value = button.value;
+        document.getElementById('buttonIcon').value = button.icon;
+        updateActionPlaceholder();
+    }
+
     modal.style.display = 'block';
     focusFirstField(modal);
 }
@@ -559,7 +769,8 @@ function closeModal() {
     const modal = document.getElementById('customButtonModal');
     if (modal) modal.style.display = 'none';
     clearFormError('customButtonModal');
-    
+    editingButtonId = null;
+
     // Clear form
     const buttonName = document.getElementById('buttonName');
     const buttonValue = document.getElementById('buttonValue');
@@ -612,15 +823,16 @@ async function saveCustomButton() {
         return;
     }
     
-    const newButton = {
-        id: Date.now().toString(),
-        name,
-        action,
-        value,
-        icon
-    };
-    
-    customButtons.push(newButton);
+    const fields = { name, action, value, icon };
+    const existing = editingButtonId && customButtons.find(button => button.id === editingButtonId);
+
+    if (existing) {
+        // Updated in place so the shortcut keeps its position
+        Object.assign(existing, fields);
+    } else {
+        customButtons.push({ id: Date.now().toString(), ...fields });
+    }
+
     await saveCustomButtonsToStorage();
     renderCustomButtons();
     closeModal();
@@ -1133,16 +1345,6 @@ function renderCustomButtons() {
         buttonElement.addEventListener('click', () => executeCustomButtonAction(button));
         makeActivatable(buttonElement, 'button');
         
-        const deleteBtn = document.createElement('button');
-        deleteBtn.className = 'delete-custom-btn';
-        deleteBtn.textContent = '×';
-        deleteBtn.title = 'Remove shortcut';
-        deleteBtn.setAttribute('aria-label', `Remove ${button.name}`);
-        deleteBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            deleteCustomButton(button.id);
-        });
-        
         const iconDiv = document.createElement('div');
         iconDiv.className = 'custom-button-icon';
         iconDiv.textContent = button.icon;
@@ -1151,11 +1353,21 @@ function renderCustomButtons() {
         nameDiv.className = 'custom-button-name';
         nameDiv.textContent = button.name;
         
-        buttonElement.appendChild(deleteBtn);
         buttonElement.appendChild(iconDiv);
         buttonElement.appendChild(nameDiv);
-        
-        container.appendChild(buttonElement);
+
+        const cell = createTileCell(buttonElement);
+        cell.appendChild(createEditButton(`Edit ${button.name}`, () => openCustomButtonModal(button)));
+
+        // Drag onto another shortcut's left or right half to reorder
+        enableDrag(cell, { kind: 'shortcut', button });
+        enableDrop(cell,
+            event => (dragSource.kind === 'shortcut' && dragSource.button.id !== button.id
+                ? (pointerFraction(event, cell) < 0.5 ? 'before' : 'after')
+                : null),
+            (source, position) => moveCustomButton(source.button, button, position));
+
+        container.appendChild(cell);
     });
 }
 
@@ -1187,8 +1399,30 @@ async function searchAndOpenBookmark(query) {
     }
 }
 
-async function deleteCustomButton(buttonId) {
-    customButtons = customButtons.filter(button => button.id !== buttonId);
+// Deletes the shortcut open in the modal, with an Undo that puts it back where it was
+async function deleteCustomButton() {
+    const index = customButtons.findIndex(button => button.id === editingButtonId);
+    closeModal();
+    if (index === -1) return;
+
+    const [removed] = customButtons.splice(index, 1);
+    await saveCustomButtonsToStorage();
+    renderCustomButtons();
+
+    showToast(`Deleted "${removed.name}"`, async () => {
+        customButtons.splice(index, 0, removed);
+        await saveCustomButtonsToStorage();
+        renderCustomButtons();
+    });
+}
+
+// Looked up by id: another tab's save can replace customButtons while a drag is in progress
+async function moveCustomButton(moved, target, position) {
+    const indexOf = id => customButtons.findIndex(button => button.id === id);
+    if (indexOf(moved.id) === -1 || indexOf(target.id) === -1) return;
+
+    const [removed] = customButtons.splice(indexOf(moved.id), 1);
+    customButtons.splice(indexOf(target.id) + (position === 'after' ? 1 : 0), 0, removed);
     await saveCustomButtonsToStorage();
     renderCustomButtons();
 }
@@ -1323,6 +1557,137 @@ async function createFolder() {
         } else {
             showFormError('createFolderModal', `Couldn't create the folder: ${error.message}`);
         }
+    }
+}
+
+// Edit bookmark/folder functionality
+// Folders a node can be moved into, indented by depth. Leaves out the node itself
+// (and so, for a folder, everything inside it) and folders Chrome won't modify.
+function getFolderOptions(tree, excludeId) {
+    const options = [];
+    const walk = (nodes, depth) => nodes.forEach(node => {
+        if (node.url || node.id === excludeId || node.unmodifiable) return;
+        options.push({ id: node.id, label: '   '.repeat(depth) + (node.title || 'Untitled folder') });
+        walk(node.children || [], depth + 1);
+    });
+    walk((tree && tree[0] && tree[0].children) || [], 0);
+    return options;
+}
+
+async function openEditBookmarkModal(node) {
+    const modal = document.getElementById('editBookmarkModal');
+    const folderSelect = document.getElementById('editBookmarkFolder');
+    if (!modal || !folderSelect) return;
+
+    const isFolder = !node.url;
+    editingBookmark = node;
+
+    document.getElementById('editBookmarkTitle').textContent = isFolder ? 'Edit folder' : 'Edit bookmark';
+    document.getElementById('editBookmarkName').value = node.title || '';
+    document.getElementById('editBookmarkUrl').value = node.url || '';
+    document.getElementById('editBookmarkUrlGroup').hidden = isFolder;
+
+    try {
+        folderSelect.innerHTML = '';
+        getFolderOptions(await chrome.bookmarks.getTree(), node.id).forEach(folder => {
+            folderSelect.appendChild(new Option(folder.label, folder.id));
+        });
+        folderSelect.value = node.parentId;
+    } catch (error) {
+        console.error('Error loading folders:', error);
+    }
+
+    modal.style.display = 'block';
+    focusFirstField(modal);
+}
+
+function closeEditBookmarkModal() {
+    const modal = document.getElementById('editBookmarkModal');
+    if (modal) modal.style.display = 'none';
+    clearFormError('editBookmarkModal');
+    editingBookmark = null;
+}
+
+async function saveEditBookmark() {
+    const node = editingBookmark;
+    const nameInput = document.getElementById('editBookmarkName');
+    const urlInput = document.getElementById('editBookmarkUrl');
+    const folderSelect = document.getElementById('editBookmarkFolder');
+    if (!node || !nameInput || !urlInput || !folderSelect) return;
+
+    const title = nameInput.value.trim();
+    if (!title) {
+        showFormError('editBookmarkModal', 'Enter a name.', nameInput);
+        return;
+    }
+
+    const changes = { title };
+    if (node.url) {
+        const url = urlInput.value.trim();
+        if (!isValidUrl(url)) {
+            showFormError('editBookmarkModal', 'Enter a full URL, including https://', urlInput);
+            return;
+        }
+        changes.url = url;
+    }
+
+    try {
+        await chrome.bookmarks.update(node.id, changes);
+    } catch (error) {
+        console.error('Error saving bookmark:', error);
+        showFormError('editBookmarkModal', `Couldn't save: ${error.message}`);
+        return;
+    }
+
+    // Moved items go to the end of the new folder
+    if (folderSelect.value && folderSelect.value !== node.parentId) {
+        try {
+            await chrome.bookmarks.move(node.id, { parentId: folderSelect.value });
+        } catch (error) {
+            console.error('Error moving bookmark:', error);
+            showFormError('editBookmarkModal', `Saved your changes, but couldn't move it: ${error.message}`);
+            return;
+        }
+    }
+
+    closeEditBookmarkModal();
+}
+
+// Counts every bookmark and folder inside a folder, at any depth
+function countDescendants(node) {
+    return (node.children || []).reduce((count, child) => count + 1 + countDescendants(child), 0);
+}
+
+// Bookmarks and empty folders are deleted straight away with an Undo toast. Chrome has
+// no trash, so a folder with contents asks first instead of trying to rebuild it on undo.
+async function deleteEditingBookmark() {
+    const node = editingBookmark;
+    if (!node) return;
+
+    try {
+        const isFolder = !node.url;
+        const itemCount = isFolder ? countDescendants((await chrome.bookmarks.getSubTree(node.id))[0]) : 0;
+
+        if (itemCount > 0) {
+            const items = itemCount === 1 ? '1 item' : `${itemCount} items`;
+            if (!confirm(`Delete "${node.title}" and the ${items} inside it? This can't be undone.`)) return;
+            await chrome.bookmarks.removeTree(node.id);
+            closeEditBookmarkModal();
+        } else {
+            await chrome.bookmarks.remove(node.id);
+            closeEditBookmarkModal();
+
+            const { parentId, index, title, url } = node;
+            showToast(`Deleted "${title}"`, async () => {
+                const bookmark = { parentId, title, ...(url && { url }) };
+                // The folder may have shrunk since; then put it back at the end
+                await chrome.bookmarks.create({ ...bookmark, index })
+                    .catch(() => chrome.bookmarks.create(bookmark));
+            });
+        }
+    } catch (error) {
+        console.error('Error deleting bookmark:', error);
+        showFormError('editBookmarkModal', `Couldn't delete: ${error.message}`);
     }
 }
 
