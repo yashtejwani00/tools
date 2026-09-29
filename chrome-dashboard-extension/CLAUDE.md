@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Chrome browser extension (Manifest V3) that replaces the default new tab page with a customized dashboard. The extension provides quick access to bookmarks, reading lists, Chrome settings, and custom shortcuts.
+This is a Chrome browser extension (Manifest V3) that replaces the default new tab page with a customized dashboard: a search palette, bookmarks, Jira issues, custom shortcuts and recently closed tabs.
 
 ## Architecture
 
@@ -12,23 +12,27 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
 
 - **manifest.json** - Chrome extension configuration (Manifest V3)
   - Overrides the new tab page with `newtab.html`
-  - Requires permissions: `bookmarks`, `favicon` (Chrome's local favicon cache for tile icons), `readingList`, `storage`, `tabs`
+  - Requires permissions: `bookmarks`, `favicon` (Chrome's local favicon cache for tile icons), `sessions`, `storage`, `tabs`
 
 - **newtab.html** - Main dashboard interface
   - Single-page application with embedded modals
+  - Header search palette (`#mainSearchInput` combobox + `#searchResults` listbox)
   - Favorites section starts at "All bookmarks" (like Chrome's bookmarks side panel) with folder navigation
-  - Chrome Controls section with expandable bookmarks/reading list
+  - Jira card with view switcher (`#jiraViews`) and a shared status menu popover (`#jiraTransitionMenu`)
   - Custom buttons section, labelled "Shortcuts" in the UI (always shown; "+" in its title opens the add modal)
+  - Recently closed card (`#recentList`)
 
 - **script.js** - Core functionality
   - All JavaScript is vanilla (no frameworks)
-  - Uses Chrome Extension APIs: `chrome.bookmarks`, `chrome.readingList`, `chrome.storage.local`, `chrome.tabs`
-  - Global state variables: `bookmarksData`, `customButtons`, `readingListData`
+  - Uses Chrome Extension APIs: `chrome.bookmarks`, `chrome.sessions`, `chrome.storage.local`, `chrome.tabs`, `chrome.windows`
+  - Global state variables: `customButtons`, `jiraData`, `jiraConfig`, `jiraSeen`, `searchResults`
 
 - **styles.css** - Styling
   - Dark theme driven by design tokens (CSS custom properties on `:root`)
   - Responsive grid layout
-  - 12-column grid: Favorites spans 7, Jira 5, Shortcuts full width; stacks below 960px
+  - 12-column grid: Favorites 7 / Jira 5, Shortcuts 7 / Recently closed 5; stacks below 960px
+
+- **selftest.js** - Node check for the pure parsing helpers (`node selftest.js`); run it after changing `parseTicketKey`, `toUrl`, `parseJiraViews` or `timeAgo`
 
 ### Key Features
 
@@ -37,18 +41,17 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
    - Back from a top-level folder returns to All bookmarks; "New folder" there creates it in Other bookmarks
    - Can add new favorites via modal that creates bookmarks in bookmarks bar
 
-2. **Chrome Controls** - Quick access buttons with expandable sections
-   - Bookmarks: Tree view with search, lazy-loaded on first expand
-   - Reading List: Shows items with read/unread status
-   - Extensions/Passwords: Direct links to `chrome://` URLs
+2. **Jira** - Issues for the selected view, with status changes and "updated" dots (see Jira Configuration)
 
 3. **Custom Buttons** - User-defined actions stored in `chrome.storage.local`
    - Action types: `url`, `chrome`, `search`, `bookmark`
    - Persistent across sessions
 
-4. **Custom Search Bar** - Main search input at top
-   - Opens `<configured Jira URL>/browse/ZMOB-<query>`
-   - Located in `performSearch()` in script.js
+4. **Search palette** - Main search input at top; `/` focuses it from anywhere on the page
+   - `buildSearchResults()` order: ticket key (`parseTicketKey`: bare number → `JIRA_DEFAULT_PROJECT`, or any `ABC-123`), URL (`toUrl`), open tabs, loaded Jira issues, bookmarks, shortcuts, Google search
+   - Choosing a tab switches to it and closes the blank new tab, like Chrome's "Switch to this tab"
+
+5. **Recently closed** - `chrome.sessions.getRecentlyClosed`, refreshed on `sessions.onChanged`; click restores the tab or window. Blank new tabs are filtered out (`isNewTabUrl`)
 
 ## Development Commands
 
@@ -84,22 +87,19 @@ After making code changes:
 
 ### Jira Configuration
 
-- Configured from the gear button on the Jira card (`jiraSettingsModal`): URL, email, API token, JQL, max results
+- Configured from the gear button on the Jira card (`jiraSettingsModal`): URL, email, API token, views, max results
 - Stored in `chrome.storage.local` under `jiraConfig`; `JIRA_DEFAULTS` in script.js supplies unset values
+- Views: the `jql` setting holds one view per line, `Name | JQL` (`parseJiraViews()`); a line without `|` is plain JQL, so single-JQL configs from older versions still work. The switcher only shows with 2+ views
+- All REST calls go through `jiraRequest(path, { method, body })`: permission check, Basic auth, error messages (400s surface Jira's own `errorMessages`/`errors`)
+- Status change: clicking a badge opens the `#jiraTransitionMenu` popover (CSS anchor positioning via `anchor-name: --transition-anchor` on the clicked badge), GETs then POSTs `/issue/{key}/transitions`
+- "Updated" dot: `jiraSeen` in storage = `{ since, keys: { KEY: ms } }`. An issue is flagged when Jira's `updated` is later than when it was last opened here (`markJiraSeen()`, called by `openJiraIssue()` and after a status change), or than `since` (first run) if never opened
 - Saving requests host permission for the Jira origin (`optional_host_permissions` in manifest.json)
 - The saved token is never written back into the form or logged; a blank token field keeps it, unless the Jira origin changed
 
-### Reading List API Compatibility
-
-Reading list API availability is checked before use (script.js:387-388):
-```javascript
-if (chrome.readingList && chrome.readingList.query) {
-```
-
 ### State Management
 
-- Custom buttons: Persisted in `chrome.storage.local`
-- Bookmarks/Reading list: Fetched on-demand from Chrome APIs
+- Custom buttons, Jira config, Jira seen state: Persisted in `chrome.storage.local`
+- Bookmarks, tabs, recently closed: Fetched on demand from Chrome APIs
 - Favorites: Reloaded each time the new tab opens
 
 ### Modal Interactions
@@ -112,14 +112,7 @@ if (chrome.readingList && chrome.readingList.query) {
 
 ### Changing Search Behavior
 
-To modify the main search bar behavior, edit `performSearch()` in script.js. It opens Jira tickets on the configured Jira URL with the "ZMOB-" prefix.
-
-### Adjusting Favorites Limit
-
-Change the slice limit in `loadFavorites()` at script.js:168:
-```javascript
-const favorites = bookmarkBar ? bookmarkBar.children.slice(0, 8) : [];
-```
+Result sources and their order live in `buildSearchResults()` in script.js. The project used for bare ticket numbers is `JIRA_DEFAULT_PROJECT`.
 
 ### Customizing Theme Colors
 
@@ -134,7 +127,8 @@ All colors, radii, fonts and z-index values are tokens in the `:root` block at t
 - Clickable tiles built in JS (`div`s): call `makeActivatable(element, role)` so they work from the keyboard
 - Modals: Escape closes the open modal, Enter in a field clicks its `.btn-primary`
 - Loading placeholders use `.skeleton`; empty/status messages use `.loading`
+- Small favicon rows (search results, recently closed) use `.row-icon` + `setRowIcon(icon, url)`
 
-### Adding New Chrome Controls
+### Previewing without loading the extension
 
-Add new button elements in newtab.html within the `.control-buttons` div (lines 69-110), then add event listener in `setupEventListeners()` function.
+The page runs in a plain browser tab if a stub defining `window.chrome` (runtime, storage, bookmarks, tabs, windows, sessions, permissions) and a fake `fetch` for `/rest/api/3/` is loaded before script.js. Favicons 404 there, since `/_favicon/` only exists inside Chrome.

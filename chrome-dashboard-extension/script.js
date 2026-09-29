@@ -1,9 +1,18 @@
 // Global variables
-let bookmarksData = [];
 let customButtons = [];
-let readingListData = [];
 let jiraData = [];
 let jiraConfig = null;
+let jiraViewIndex = 0; // Which of the configured Jira views is shown
+let jiraLoadSeq = 0; // Discards responses from a view the user already switched away from
+// When each issue was last opened from here; issues updated after that get a dot.
+// `since` covers issues never opened, so a first run doesn't flag everything.
+let jiraSeen = { since: 0, keys: {} };
+
+// Search (palette) state
+let searchResults = [];
+let searchResultsQuery = null; // Query the current results were built for
+let searchSelected = 0;
+let searchSeq = 0;
 
 // Favorites navigation state
 let currentFolderId = null; // Currently displayed folder ID (or ALL_BOOKMARKS_ID)
@@ -24,6 +33,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     loadFavorites();
     loadCustomButtons();
+    loadRecentlyClosed();
     // Issues need the stored config, so wait for it before fetching
     loadJiraConfig().then(loadJiraIssues);
     setupEventListeners();
@@ -31,22 +41,22 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // Setup event listeners
 function setupEventListeners() {
-    // Custom search functionality
-    const searchInput1 = document.getElementById('mainSearchInput');
-    const searchSubmit = document.getElementById('searchSubmit');
-    
-    if (searchInput1 && searchSubmit) {
-        // Handle Enter key in search input
-        searchInput1.addEventListener('keypress', function(event) {
-            if (event.key === 'Enter') {
-                performSearch();
-            }
+    setupSearch();
+
+    if (chrome.sessions) chrome.sessions.onChanged.addListener(loadRecentlyClosed);
+
+    // Arrow keys move through the Jira status menu (Escape closing it is built into popover)
+    const transitionMenu = document.getElementById('jiraTransitionMenu');
+    if (transitionMenu) {
+        transitionMenu.addEventListener('keydown', event => {
+            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+            event.preventDefault();
+            const options = [...transitionMenu.querySelectorAll('.transition-option:not(:disabled)')];
+            const next = options.indexOf(document.activeElement) + (event.key === 'ArrowDown' ? 1 : -1);
+            options[(next + options.length) % options.length]?.focus();
         });
-        
-        // Handle search button click
-        searchSubmit.addEventListener('click', performSearch);
     }
-    
+
     // Refresh favorites
     const refreshBtn = document.getElementById('refreshFavorites');
     // Wrapped so the click event isn't passed in as a folder ID
@@ -175,7 +185,7 @@ function setupEventListeners() {
     });
 
     // Clear a field's error highlight as soon as it's edited
-    document.querySelectorAll('.modal input, .modal select').forEach(field => {
+    document.querySelectorAll('.modal input, .modal select, .modal textarea').forEach(field => {
         field.addEventListener('input', () => field.removeAttribute('aria-invalid'));
     });
 }
@@ -651,9 +661,13 @@ const JIRA_DEFAULTS = {
     baseUrl: 'https://zineone.atlassian.net',
     email: '',
     apiToken: '',
-    jql: 'assignee = currentUser() AND statusCategory != done ORDER BY updated DESC',
+    // One view per line, "Name | JQL"
+    jql: 'Mine | assignee = currentUser() AND statusCategory != done ORDER BY updated DESC',
     maxResults: 50
 };
+
+// Project used when a bare number is typed into search
+const JIRA_DEFAULT_PROJECT = 'ZMOB';
 
 // Placeholder credentials written to storage by earlier versions - treated as "not set"
 const JIRA_PLACEHOLDERS = ['EMAIL_HERE', 'API_TOKEN_HERE', 'YOUR_API_TOKEN_HERE'];
@@ -669,8 +683,15 @@ const JIRA_SKELETON = '<div class="skeleton skeleton-row"></div>'.repeat(4);
 // Load Jira configuration
 async function loadJiraConfig() {
     try {
-        const result = await chrome.storage.local.get(['jiraConfig']);
+        const result = await chrome.storage.local.get(['jiraConfig', 'jiraSeen']);
         jiraConfig = { ...JIRA_DEFAULTS, ...(result.jiraConfig || {}) };
+
+        if (result.jiraSeen) {
+            jiraSeen = result.jiraSeen;
+        } else {
+            jiraSeen = { since: Date.now(), keys: {} };
+            await chrome.storage.local.set({ jiraSeen });
+        }
     } catch (error) {
         console.error('Error loading Jira config:', error);
         jiraConfig = { ...JIRA_DEFAULTS };
@@ -716,8 +737,9 @@ function normalizeJiraBaseUrl(value) {
     }
 }
 
-// Fetch issues from Jira API
-async function fetchJiraIssues() {
+// Authenticated call to the Jira REST API. Resolves to the parsed JSON body
+// (null for 204 No Content); throws an Error with a user-facing message.
+async function jiraRequest(path, { method = 'GET', body } = {}) {
     if (!jiraConfig) await loadJiraConfig();
 
     if (!isJiraConfigured()) {
@@ -735,29 +757,16 @@ async function fetchJiraIssues() {
         throw new Error(`No access to ${origin}. Open Jira settings and save to grant access.`);
     }
 
-    // Use the new /search/jql endpoint (old /search is deprecated)
-    const url = `${jiraConfig.baseUrl}/rest/api/3/search/jql`;
-
     const auth = btoa(`${jiraConfig.email}:${jiraConfig.apiToken}`);
+    const headers = { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' };
+    if (body) headers['Content-Type'] = 'application/json';
 
-    console.log('Fetching from URL:', url);
-
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Basic ${auth}`,
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
-        },
+    const response = await fetch(`${jiraConfig.baseUrl}${path}`, {
+        method,
+        headers,
         credentials: 'omit',
-        body: JSON.stringify({
-            jql: jiraConfig.jql,
-            maxResults: jiraConfig.maxResults,
-            fields: ['summary', 'status', 'updated']
-        })
+        body: body ? JSON.stringify(body) : undefined
     });
-
-    console.log('Response status:', response.status);
 
     if (!response.ok) {
         const errorText = await response.text();
@@ -769,17 +778,78 @@ async function fetchJiraIssues() {
             throw new Error('Access denied. Check your Jira permissions.');
         } else if (response.status === 410) {
             throw new Error('Jira API endpoint deprecated or unavailable. Please check your Jira instance configuration.');
-        } else {
-            throw new Error(`Jira API error: ${response.status} ${response.statusText}`);
         }
+
+        // Jira explains 400s (bad JQL, missing required fields) in errorMessages/errors
+        let detail = '';
+        try {
+            const data = JSON.parse(errorText);
+            detail = [...(data.errorMessages || []), ...Object.values(data.errors || {})].join(' ');
+        } catch (_) { /* not JSON */ }
+        throw new Error(detail || `Jira API error: ${response.status} ${response.statusText}`);
     }
 
-    const data = await response.json();
-    console.log('Successfully fetched issues:', data.total);
+    return response.status === 204 ? null : response.json();
+}
+
+// Fetch issues matching a JQL query
+async function fetchJiraIssues(jql) {
+    // Use the new /search/jql endpoint (old /search is deprecated)
+    const data = await jiraRequest('/rest/api/3/search/jql', {
+        method: 'POST',
+        body: {
+            jql,
+            maxResults: jiraConfig.maxResults,
+            fields: ['summary', 'status', 'updated']
+        }
+    });
     return data.issues || [];
 }
 
-// Load and display Jira issues
+// The configured views, parsed from the multi-line JQL setting
+function getJiraViews() {
+    return parseJiraViews((jiraConfig && jiraConfig.jql) || JIRA_DEFAULTS.jql);
+}
+
+// "Name | JQL" per line; a line without "|" is JQL only (settings saved before views existed)
+function parseJiraViews(text) {
+    return text.split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map((line, index) => {
+            const bar = line.indexOf('|');
+            return bar > 0
+                ? { name: line.slice(0, bar).trim(), jql: line.slice(bar + 1).trim() }
+                : { name: index === 0 ? 'Mine' : `View ${index + 1}`, jql: line };
+        })
+        .filter(view => view.jql);
+}
+
+// View switcher, only shown when there's more than one view
+function renderJiraViews() {
+    const container = document.getElementById('jiraViews');
+    if (!container) return;
+
+    container.innerHTML = '';
+    const views = getJiraViews();
+    if (!isJiraConfigured() || views.length < 2) return;
+
+    views.forEach((view, index) => {
+        const button = document.createElement('button');
+        button.className = 'jira-view-btn';
+        button.textContent = view.name;
+        button.title = view.jql;
+        button.setAttribute('aria-pressed', String(index === jiraViewIndex));
+        button.addEventListener('click', () => {
+            if (index === jiraViewIndex) return;
+            jiraViewIndex = index;
+            loadJiraIssues();
+        });
+        container.appendChild(button);
+    });
+}
+
+// Load and display Jira issues for the selected view
 async function loadJiraIssues() {
     const container = document.getElementById('jiraContent');
     const statsContainer = document.getElementById('jiraStats');
@@ -788,24 +858,31 @@ async function loadJiraIssues() {
 
     if (!jiraConfig) await loadJiraConfig();
 
+    const views = getJiraViews();
+    if (jiraViewIndex >= views.length) jiraViewIndex = 0;
+    renderJiraViews();
+
     if (!isJiraConfigured()) {
         renderJiraSetupPrompt();
         return;
     }
+
+    const seq = ++jiraLoadSeq;
 
     try {
         container.innerHTML = JIRA_SKELETON;
         container.setAttribute('aria-busy', 'true');
         if (statsContainer) statsContainer.textContent = '';
 
-        console.log('Fetching Jira issues...');
-        const issues = await fetchJiraIssues();
+        const issues = await fetchJiraIssues(views[jiraViewIndex].jql);
+        if (seq !== jiraLoadSeq) return; // Another view was picked meanwhile
 
         jiraData = issues;
         renderJiraIssues();
 
         console.log(`Loaded ${issues.length} Jira issues`);
     } catch (error) {
+        if (seq !== jiraLoadSeq) return;
         console.error('Error loading Jira issues:', error);
 
         container.innerHTML = `
@@ -825,7 +902,7 @@ async function loadJiraIssues() {
             statsContainer.textContent = 'Error loading data';
         }
     } finally {
-        container.setAttribute('aria-busy', 'false');
+        if (seq === jiraLoadSeq) container.setAttribute('aria-busy', 'false');
     }
 }
 
@@ -869,7 +946,7 @@ function renderJiraIssues() {
     if (!container) return;
 
     if (jiraData.length === 0) {
-        container.innerHTML = '<div class="loading">No issues assigned to you</div>';
+        container.innerHTML = '<div class="loading">No issues in this view</div>';
         if (statsContainer) statsContainer.textContent = '';
         return;
     }
@@ -913,7 +990,9 @@ function renderJiraIssues() {
         const statusParts = Object.entries(statusCounts)
             .map(([status, count]) => `${count} ${status}`)
             .join(', ');
-        statsContainer.textContent = `${statsText} (${statusParts})`;
+        const updatedCount = sortedIssues.filter(isJiraIssueUpdated).length;
+        const updatedText = updatedCount ? ` · ${updatedCount} updated` : '';
+        statsContainer.textContent = `${statsText} (${statusParts})${updatedText}`;
     }
 
     // Render issues
@@ -948,7 +1027,7 @@ function createJiraIssueElement(issue) {
         <div class="jira-issue-key"></div>
         <div class="jira-issue-content">
             <div class="jira-issue-title"></div>
-            <div class="jira-status-badge jira-status-${statusCategory}"></div>
+            <button class="jira-status-badge jira-status-${statusCategory}" aria-haspopup="menu"></button>
         </div>
         <svg class="icon jira-arrow" viewBox="0 0 24 24">
             <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
@@ -958,17 +1037,126 @@ function createJiraIssueElement(issue) {
     // Jira fields are set as text, never parsed as HTML
     issueDiv.querySelector('.jira-issue-key').textContent = issue.key;
     issueDiv.querySelector('.jira-issue-title').textContent = issue.fields.summary;
-    issueDiv.querySelector('.jira-status-badge').textContent = issue.fields.status.name;
+
+    const badge = issueDiv.querySelector('.jira-status-badge');
+    badge.textContent = issue.fields.status.name;
+    badge.setAttribute('aria-label', `Status: ${issue.fields.status.name}. Change status`);
+    badge.addEventListener('click', event => {
+        event.stopPropagation(); // Don't open the issue
+        openTransitionMenu(issue, badge);
+    });
+
+    if (isJiraIssueUpdated(issue)) {
+        issueDiv.classList.add('is-updated');
+        const note = document.createElement('span');
+        note.className = 'visually-hidden';
+        note.textContent = 'Updated since you last opened it';
+        issueDiv.querySelector('.jira-issue-content').appendChild(note);
+    }
 
     return issueDiv;
 }
 
+// Updated in Jira after it was last opened from here (or after first run, if never opened)
+function isJiraIssueUpdated(issue) {
+    return Date.parse(issue.fields.updated) > (jiraSeen.keys[issue.key] || jiraSeen.since);
+}
+
+// ponytail: compares Jira's server clock to this machine's; a few seconds of skew can
+// leave your own change flagged. Store the issue's `updated` instead if that shows up.
+function markJiraSeen(issueKey) {
+    jiraSeen.keys[issueKey] = Date.now();
+    chrome.storage.local.set({ jiraSeen }).catch(error => console.error('Error saving Jira seen state:', error));
+    if (jiraData.some(issue => issue.key === issueKey)) renderJiraIssues();
+}
+
 // Open Jira issue in new tab
 function openJiraIssue(issueKey) {
-    if (!issueKey || !jiraConfig) return;
+    if (!issueKey) return;
 
-    const url = `${jiraConfig.baseUrl}/browse/${encodeURIComponent(issueKey)}`;
-    chrome.tabs.create({ url: url });
+    const baseUrl = (jiraConfig || JIRA_DEFAULTS).baseUrl;
+    chrome.tabs.create({ url: `${baseUrl}/browse/${encodeURIComponent(issueKey)}` });
+    markJiraSeen(issueKey);
+}
+
+// Status menu: lists the issue's available transitions and applies the one picked
+async function openTransitionMenu(issue, badge) {
+    const menu = document.getElementById('jiraTransitionMenu');
+    if (!menu) return;
+
+    // The menu is positioned against whichever badge carries the anchor name (CSS anchor positioning)
+    document.querySelectorAll('.jira-status-badge').forEach(other => { other.style.anchorName = ''; });
+    badge.style.anchorName = '--transition-anchor';
+
+    if (menu.matches(':popover-open')) menu.hidePopover();
+    menu.dataset.issueKey = issue.key;
+    menu.removeAttribute('role'); // Set to "menu" once there are options
+    menu.innerHTML = '<div class="transition-status">Loading…</div>';
+    menu.showPopover({ source: badge }); // source: focus returns to the badge on close
+
+    try {
+        const data = await jiraRequest(`/rest/api/3/issue/${encodeURIComponent(issue.key)}/transitions`);
+        if (menu.dataset.issueKey !== issue.key) return; // Opened for another issue meanwhile
+
+        menu.innerHTML = '';
+        const transitions = data.transitions || [];
+        if (transitions.length === 0) {
+            showTransitionStatus(menu, 'No status changes available.');
+            return;
+        }
+
+        transitions.forEach(transition => {
+            const option = document.createElement('button');
+            option.className = 'transition-option';
+            option.setAttribute('role', 'menuitem');
+
+            const categoryKey = transition.to?.statusCategory?.key;
+            const dot = document.createElement('span');
+            dot.className = `transition-dot dot-${JIRA_STATUS_CATEGORIES.includes(categoryKey) ? categoryKey : 'new'}`;
+
+            const label = document.createElement('span');
+            label.textContent = transition.to?.name || transition.name;
+            if (transition.name !== label.textContent) option.title = transition.name;
+
+            option.append(dot, label);
+            option.addEventListener('click', () => applyTransition(issue, transition, menu, option));
+            menu.appendChild(option);
+        });
+        menu.setAttribute('role', 'menu');
+        menu.querySelector('.transition-option').focus();
+    } catch (error) {
+        if (menu.dataset.issueKey !== issue.key) return;
+        menu.innerHTML = '';
+        showTransitionStatus(menu, error.message);
+    }
+}
+
+function showTransitionStatus(menu, message) {
+    const status = document.createElement('div');
+    status.className = 'transition-status';
+    status.textContent = message;
+    menu.appendChild(status);
+}
+
+async function applyTransition(issue, transition, menu, option) {
+    menu.querySelectorAll('.transition-option').forEach(other => { other.disabled = true; });
+    menu.querySelectorAll('.transition-status').forEach(status => status.remove());
+
+    try {
+        await jiraRequest(`/rest/api/3/issue/${encodeURIComponent(issue.key)}/transitions`, {
+            method: 'POST',
+            body: { transition: { id: transition.id } }
+        });
+        menu.hidePopover();
+        markJiraSeen(issue.key); // Your own change isn't news
+        await loadJiraIssues();
+    } catch (error) {
+        console.error('Error changing Jira status:', error);
+        menu.querySelectorAll('.transition-option').forEach(other => { other.disabled = false; });
+        option.focus(); // Disabling it dropped focus out of the menu
+        // Usually a transition that needs a screen (e.g. resolution) - Jira's message says which field
+        showTransitionStatus(menu, error.message);
+    }
 }
 
 // Jira settings modal
@@ -1055,6 +1243,11 @@ async function saveJiraSettings() {
     }
 
     const jql = inputs.jql.value.trim() || JIRA_DEFAULTS.jql;
+    const viewLines = jql.split('\n').filter(line => line.trim());
+    if (parseJiraViews(jql).length !== viewLines.length) {
+        showFormError('jiraSettingsModal', 'Each view needs JQL after the "|", e.g. Mine | assignee = currentUser()', inputs.jql);
+        return;
+    }
 
     const maxResultsText = inputs.maxResults.value.trim();
     const maxResults = maxResultsText ? Number(maxResultsText) : JIRA_DEFAULTS.maxResults;
@@ -1166,7 +1359,7 @@ function executeCustomButtonAction(button) {
             openUrl(button.value);
             break;
         case 'search':
-            openUrl(`https://www.google.com/search?q=${encodeURIComponent(button.value)}`);
+            openUrl(webSearchUrl(button.value));
             break;
         case 'bookmark':
             searchAndOpenBookmark(button.value);
@@ -1395,30 +1588,339 @@ function isValidUrl(string) {
     }
 }
 
-// Custom search functionality
-function performSearch() {
-    const searchInput = document.getElementById('mainSearchInput');
-    if (!searchInput) return;
-    
-    const query = searchInput.value.trim();
-    if (!query) return;
-    
-    // Jira ticket URL on the configured instance
-    const jiraBaseUrl = (jiraConfig && jiraConfig.baseUrl) || JIRA_DEFAULTS.baseUrl;
-    const baseURL = `${jiraBaseUrl}/browse/ZMOB-`;
-    
-    // Encode the search query to handle spaces and special characters
-    const encodedQuery = encodeURIComponent(query);
-    
-    // Construct the final URL
-    const searchURL = baseURL + encodedQuery;
-    
-    console.log('Searching for:', query);
-    console.log('Search URL:', searchURL);
-    
-    // Open search in new tab
-    chrome.tabs.create({ url: searchURL });
-    
-    // Clear the search input
-    searchInput.value = '';
+function webSearchUrl(query) {
+    return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+}
+
+function getHostname(url) {
+    try {
+        return new URL(url).hostname || url;
+    } catch (_) {
+        return url;
+    }
+}
+
+// Blank new tab pages (including this one) - left out of tab search and recently closed
+function isNewTabUrl(url) {
+    return !url || url.startsWith('chrome://newtab') || url.startsWith(chrome.runtime.getURL(''));
+}
+
+// Favicon from Chrome's cache in an icon box, keeping the box's text as the fallback
+function setRowIcon(icon, url) {
+    const faviconUrl = url && getFaviconUrl(url);
+    if (!faviconUrl) return;
+    const fallback = icon.textContent;
+    const img = document.createElement('img');
+    img.src = faviconUrl;
+    img.alt = '';
+    img.onerror = () => { icon.textContent = fallback; };
+    icon.textContent = '';
+    icon.appendChild(img);
+}
+
+// ==========================================================================
+// Search palette
+// ==========================================================================
+
+function setupSearch() {
+    const input = document.getElementById('mainSearchInput');
+    const submit = document.getElementById('searchSubmit');
+    if (!input) return;
+
+    input.addEventListener('input', updateSearchResults);
+    input.addEventListener('focus', updateSearchResults);
+    input.addEventListener('blur', () => setSearchListOpen(false));
+
+    input.addEventListener('keydown', event => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (searchResults.length === 0) return;
+            const step = event.key === 'ArrowDown' ? 1 : -1;
+            selectSearchResult((searchSelected + step + searchResults.length) % searchResults.length);
+        } else if (event.key === 'Enter' && !event.isComposing) {
+            event.preventDefault();
+            runSelectedSearchResult();
+        } else if (event.key === 'Escape') {
+            if (input.value) {
+                input.value = '';
+                updateSearchResults();
+            } else {
+                input.blur();
+            }
+        }
+    });
+
+    if (submit) submit.addEventListener('click', runSelectedSearchResult);
+
+    // "/" jumps to search from anywhere on the page, unless typing somewhere else
+    document.addEventListener('keydown', event => {
+        if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.target.closest('input, textarea, select, [contenteditable]')) return;
+        if (document.querySelector('.modal[style*="block"]')) return;
+        event.preventDefault();
+        input.focus();
+    });
+}
+
+// Ticket key for a query: "123" means the default project, "ABC-45" any project
+function parseTicketKey(query) {
+    if (/^\d+$/.test(query)) return `${JIRA_DEFAULT_PROJECT}-${query}`;
+    return /^[a-z][a-z0-9_]*-\d+$/i.test(query) ? query.toUpperCase() : null;
+}
+
+// URL to open when the query looks like one ("github.com/x", "localhost:3000"), else null
+function toUrl(query) {
+    if (/^(https?|chrome):\/\/\S+$/i.test(query)) return query;
+    if (/^localhost(:\d+)?(\/\S*)?$/i.test(query)) return `http://${query}`;
+    if (/^[\w-]+(\.[\w-]+)*\.[a-z]{2,}(:\d+)?(\/\S*)?$/i.test(query)) return `https://${query}`;
+    return null;
+}
+
+async function buildSearchResults(query) {
+    const terms = query.toLowerCase().split(/\s+/);
+    const matches = text => terms.every(term => text.toLowerCase().includes(term));
+    const jiraUrl = (jiraConfig || JIRA_DEFAULTS).baseUrl;
+    const results = [];
+
+    const ticketKey = parseTicketKey(query);
+    if (ticketKey) {
+        const known = jiraData.find(issue => issue.key === ticketKey);
+        results.push({
+            kind: 'Jira', title: `Open ${ticketKey}`, detail: known && known.fields.summary,
+            iconUrl: jiraUrl, run: () => openJiraIssue(ticketKey)
+        });
+    }
+
+    const url = toUrl(query);
+    if (url) results.push({ kind: 'Open', title: url, iconUrl: url, run: () => openUrl(url) });
+
+    const [tabs, bookmarks] = await Promise.all([
+        chrome.tabs.query({}).catch(() => []),
+        chrome.bookmarks.search(query).catch(() => [])
+    ]);
+
+    tabs.filter(tab => !isNewTabUrl(tab.url) && matches(`${tab.title} ${tab.url}`))
+        .slice(0, 5)
+        .forEach(tab => results.push({
+            kind: 'Tab', title: tab.title || tab.url, detail: getHostname(tab.url),
+            iconUrl: tab.url, run: () => switchToTab(tab)
+        }));
+
+    jiraData.filter(issue => issue.key !== ticketKey && matches(`${issue.key} ${issue.fields.summary}`))
+        .slice(0, 5)
+        .forEach(issue => results.push({
+            kind: 'Jira', title: issue.fields.summary, detail: `${issue.key} · ${issue.fields.status.name}`,
+            iconUrl: jiraUrl, run: () => openJiraIssue(issue.key)
+        }));
+
+    bookmarks.filter(bookmark => bookmark.url)
+        .slice(0, 6)
+        .forEach(bookmark => results.push({
+            kind: 'Bookmark', title: bookmark.title || bookmark.url, detail: getHostname(bookmark.url),
+            iconUrl: bookmark.url, run: () => openUrl(bookmark.url)
+        }));
+
+    customButtons.filter(button => matches(button.name))
+        .slice(0, 3)
+        .forEach(button => results.push({
+            kind: 'Shortcut', title: button.name, icon: button.icon, run: () => executeCustomButtonAction(button)
+        }));
+
+    results.push({
+        kind: 'Search', title: `Search Google for “${query}”`,
+        iconUrl: 'https://www.google.com', run: () => openUrl(webSearchUrl(query))
+    });
+
+    return results;
+}
+
+async function updateSearchResults() {
+    const input = document.getElementById('mainSearchInput');
+    const query = input.value.trim();
+    const seq = ++searchSeq;
+
+    const results = query ? await buildSearchResults(query) : [];
+    if (seq !== searchSeq) return; // A newer keystroke already rebuilt the list
+
+    searchResults = results;
+    searchResultsQuery = query;
+    searchSelected = 0;
+    renderSearchResults();
+    setSearchListOpen(results.length > 0 && document.activeElement === input);
+}
+
+function renderSearchResults() {
+    const list = document.getElementById('searchResults');
+    list.innerHTML = '';
+
+    searchResults.forEach((result, index) => {
+        const item = document.createElement('li');
+        item.id = `search-result-${index}`;
+        item.className = 'search-result';
+        item.setAttribute('role', 'option');
+        // Keep focus in the input so blur doesn't close the list before the click lands
+        item.addEventListener('mousedown', event => event.preventDefault());
+        item.addEventListener('click', () => runSearchResult(result));
+
+        const icon = document.createElement('span');
+        icon.className = 'row-icon';
+        icon.textContent = result.icon || result.kind[0];
+        setRowIcon(icon, result.iconUrl);
+
+        const text = document.createElement('span');
+        text.className = 'search-result-text';
+        const title = document.createElement('span');
+        title.className = 'search-result-title';
+        title.textContent = result.title;
+        text.appendChild(title);
+        if (result.detail) {
+            const detail = document.createElement('span');
+            detail.className = 'search-result-detail';
+            detail.textContent = result.detail;
+            text.appendChild(detail);
+        }
+
+        const kind = document.createElement('span');
+        kind.className = 'search-result-kind';
+        kind.textContent = result.kind;
+
+        item.append(icon, text, kind);
+        list.appendChild(item);
+    });
+
+    selectSearchResult(searchSelected);
+}
+
+function selectSearchResult(index) {
+    searchSelected = index;
+    const input = document.getElementById('mainSearchInput');
+    document.querySelectorAll('.search-result').forEach((item, itemIndex) => {
+        item.setAttribute('aria-selected', String(itemIndex === index));
+    });
+
+    const selected = document.getElementById(`search-result-${index}`);
+    if (selected) {
+        input.setAttribute('aria-activedescendant', selected.id);
+        selected.scrollIntoView({ block: 'nearest' });
+    } else {
+        input.removeAttribute('aria-activedescendant');
+    }
+}
+
+function setSearchListOpen(open) {
+    document.getElementById('searchResults').hidden = !open;
+    document.getElementById('mainSearchInput').setAttribute('aria-expanded', String(open));
+}
+
+async function runSelectedSearchResult() {
+    const input = document.getElementById('mainSearchInput');
+    // Enter can beat the async results for what was just typed
+    if (searchResultsQuery !== input.value.trim()) await updateSearchResults();
+    const result = searchResults[searchSelected];
+    if (result) runSearchResult(result);
+}
+
+function runSearchResult(result) {
+    document.getElementById('mainSearchInput').value = '';
+    searchResults = [];
+    searchResultsQuery = '';
+    renderSearchResults();
+    setSearchListOpen(false);
+    result.run();
+}
+
+async function switchToTab(tab) {
+    try {
+        await chrome.tabs.update(tab.id, { active: true });
+        await chrome.windows.update(tab.windowId, { focused: true });
+    } catch (error) {
+        // The tab was closed after the results were built
+        console.error('Error switching tab:', error);
+        openUrl(tab.url);
+        return;
+    }
+    // Like Chrome's "Switch to this tab": don't leave this blank new tab behind
+    const current = await chrome.tabs.getCurrent();
+    if (current && current.id !== tab.id) chrome.tabs.remove(current.id);
+}
+
+// ==========================================================================
+// Recently closed
+// ==========================================================================
+
+const RECENT_LIMIT = 8;
+
+async function loadRecentlyClosed() {
+    const container = document.getElementById('recentList');
+    if (!container) return;
+
+    if (!chrome.sessions) {
+        container.innerHTML = '<div class="loading">Reload the extension to allow access to recently closed tabs.</div>';
+        return;
+    }
+
+    try {
+        // 25 is the API maximum; blank new tabs are filtered out before trimming
+        const sessions = await chrome.sessions.getRecentlyClosed({ maxResults: 25 });
+        const entries = sessions
+            .filter(session => session.window || (session.tab && !isNewTabUrl(session.tab.url)))
+            .slice(0, RECENT_LIMIT);
+
+        container.innerHTML = '';
+        if (entries.length === 0) {
+            container.innerHTML = '<div class="loading">Nothing closed recently</div>';
+            return;
+        }
+
+        entries.forEach(session => container.appendChild(createRecentItem(session)));
+    } catch (error) {
+        console.error('Error loading recently closed:', error);
+        container.innerHTML = '<div class="loading">Couldn\'t load recently closed tabs</div>';
+    }
+}
+
+function createRecentItem(session) {
+    const item = document.createElement('div');
+    item.className = 'recent-item';
+    const sessionId = (session.tab || session.window).sessionId;
+    item.addEventListener('click', () => {
+        chrome.sessions.restore(sessionId).catch(error => console.error('Error restoring session:', error));
+    });
+    makeActivatable(item, 'button');
+
+    const icon = document.createElement('span');
+    icon.className = 'row-icon';
+
+    const title = document.createElement('span');
+    title.className = 'recent-title';
+
+    if (session.tab) {
+        const { url } = session.tab;
+        title.textContent = session.tab.title || getHostname(url);
+        item.title = url;
+        icon.textContent = getInitials(title.textContent);
+        setRowIcon(icon, url);
+    } else {
+        const tabs = session.window.tabs || [];
+        title.textContent = `Window · ${tabs.length} ${tabs.length === 1 ? 'tab' : 'tabs'}`;
+        item.title = tabs.map(tab => tab.title || tab.url).join('\n');
+        icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 14H5V8h14v10z"/></svg>';
+    }
+
+    const time = document.createElement('span');
+    time.className = 'recent-time';
+    time.textContent = timeAgo(session.lastModified);
+
+    item.append(icon, title, time);
+    return item;
+}
+
+// "5m ago" from a time in seconds since the epoch (the sessions API's unit)
+function timeAgo(seconds) {
+    const minutes = Math.floor((Date.now() / 1000 - seconds) / 60);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
 }
