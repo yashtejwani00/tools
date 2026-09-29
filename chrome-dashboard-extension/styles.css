@@ -850,6 +850,13 @@ button {
 /* ==========================================================================
    Tile edit button, drag and drop, toast
    ========================================================================== */
+/* A tile and its edit button side by side (the button can't be inside a role="button" tile) */
+.tile-cell {
+    position: relative;
+    display: grid; /* stretches the tile to fill its grid slot */
+    min-width: 0;
+}
+
 .tile-edit-btn {
     position: absolute;
     display: grid;
@@ -858,7 +865,7 @@ button {
     height: 26px;
     background: transparent;
     border: none;
-    border-radius: 7px;
+    border-radius: var(--radius-sm);
     color: var(--text-faint);
     opacity: 0;
     transition: opacity var(--duration) ease, background-color var(--duration) ease, color var(--duration) ease;
@@ -869,21 +876,19 @@ button {
     height: 15px;
 }
 
-.favorite-item .tile-edit-btn {
+.favorite-item + .tile-edit-btn {
     top: 0.3rem;
     right: 0.3rem;
 }
 
-.custom-button .tile-edit-btn {
+.custom-button + .tile-edit-btn {
     top: 50%;
     right: 0.45rem;
     transform: translateY(-50%);
 }
 
-.favorite-item:hover .tile-edit-btn,
-.favorite-item:focus-within .tile-edit-btn,
-.custom-button:hover .tile-edit-btn,
-.custom-button:focus-within .tile-edit-btn {
+.tile-cell:hover .tile-edit-btn,
+.tile-cell:focus-within .tile-edit-btn {
     opacity: 1;
 }
 
@@ -896,16 +901,16 @@ button {
     opacity: 0.4;
 }
 
-/* Accent bar on the side the dragged tile will land */
-.drop-before {
+/* Drop classes go on the tile cell; the accent bar marks the side the dragged tile will land */
+.drop-before > :first-child {
     box-shadow: inset 3px 0 0 var(--accent);
 }
 
-.drop-after {
+.drop-after > :first-child {
     box-shadow: inset -3px 0 0 var(--accent);
 }
 
-.favorite-item.drop-into,
+.drop-into > .favorite-item,
 .breadcrumb-btn.drop-into {
     background: var(--accent-soft);
     border-color: var(--accent);

@@ -138,7 +138,8 @@ All colors, radii, fonts and z-index values are tokens in the `:root` block at t
 - Clickable tiles built in JS (`div`s): call `makeActivatable(element, role)` so they work from the keyboard
 - Modals: Escape closes the open modal, Enter in a field clicks its `.btn-primary`
 - Loading placeholders use `.skeleton`; empty/status messages use `.loading`
-- Tile edit buttons: `createEditButton(label, onClick)`; drag and drop: `enableDrag()` / `enableDrop()`
+- Tile edit buttons: wrap the tile with `createTileCell(tile)` and append `createEditButton(label, onClick)` to the cell, never inside the tile (a `role="button"` tile hides its children from assistive tech); drag and drop (`enableDrag()` / `enableDrop()`) goes on the cell
+- Favorites reload from `chrome.bookmarks` change events and shortcuts from `chrome.storage.onChanged`, so changes from other tabs show up; bookmark edits don't need their own reload
 - Transient messages (with optional Undo): `showToast(message, undo)`
 
 ### Adding New Chrome Controls

@@ -21,6 +21,7 @@ let editingButtonId = null; // Shortcut open in the shortcut modal (null when ad
 
 // Drag and drop: { kind: 'favorite', node } or { kind: 'shortcut', button } while dragging
 let dragSource = null;
+let dropIndicator = null; // { element, className } of the highlighted drop target
 
 // Toast state
 let toastTimer = null;
@@ -145,52 +146,6 @@ function setupEventListeners() {
     const actionSelect = document.getElementById('buttonAction');
     if (actionSelect) actionSelect.addEventListener('change', updateActionPlaceholder);
     
-    // Close modals when clicking outside
-    const customModal = document.getElementById('customButtonModal');
-    if (customModal) {
-        customModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeModal();
-            }
-        });
-    }
-    
-    const favoriteModal = document.getElementById('addFavoriteModal');
-    if (favoriteModal) {
-        favoriteModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeFavoriteModal();
-            }
-        });
-    }
-
-    const folderModal = document.getElementById('createFolderModal');
-    if (folderModal) {
-        folderModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeFolderModal();
-            }
-        });
-    }
-
-    const editBookmarkModal = document.getElementById('editBookmarkModal');
-    if (editBookmarkModal) {
-        editBookmarkModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeEditBookmarkModal();
-            }
-        });
-    }
-
-    const jiraModal = document.getElementById('jiraSettingsModal');
-    if (jiraModal) {
-        jiraModal.addEventListener('click', function(event) {
-            if (event.target === this) {
-                closeJiraSettingsModal();
-            }
-        });
-    }
-
     // Issue list fade: recheck on scroll, resize, and whenever its content is replaced
     const jiraContent = document.getElementById('jiraContent');
     if (jiraContent) {
@@ -199,7 +154,8 @@ function setupEventListeners() {
         new MutationObserver(updateJiraScrollFade).observe(jiraContent, { childList: true });
     }
 
-    // Keyboard: Escape closes the open modal, Enter in a field submits it
+    // Every modal and its close function: clicking outside or pressing Escape closes it,
+    // Enter in a field submits it
     const modalClosers = {
         addFavoriteModal: closeFavoriteModal,
         customButtonModal: closeModal,
@@ -207,6 +163,14 @@ function setupEventListeners() {
         editBookmarkModal: closeEditBookmarkModal,
         jiraSettingsModal: closeJiraSettingsModal
     };
+
+    Object.entries(modalClosers).forEach(([id, close]) => {
+        const modal = document.getElementById(id);
+        if (!modal) return;
+        modal.addEventListener('click', event => {
+            if (event.target === modal) close();
+        });
+    });
 
     document.addEventListener('keydown', function(event) {
         const openModalId = Object.keys(modalClosers).find(id => {
@@ -228,6 +192,27 @@ function setupEventListeners() {
     document.querySelectorAll('.modal input, .modal select').forEach(field => {
         field.addEventListener('input', () => field.removeAttribute('aria-invalid'));
     });
+
+    // Other new tab pages and Chrome's bookmark manager change the same data. Reload on
+    // their changes so this page never acts on (or saves back) a stale copy. This page's
+    // own bookmark edits arrive here too, so they don't reload the grid themselves.
+    ['onCreated', 'onRemoved', 'onChanged', 'onMoved'].forEach(name => {
+        chrome.bookmarks[name].addListener(scheduleFavoritesReload);
+    });
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.customButtons) {
+            customButtons = changes.customButtons.newValue || [];
+            renderCustomButtons();
+        }
+    });
+}
+
+// Bookmark events come in bursts (e.g. deleting a folder, sync), so reload once they settle
+let favoritesReloadTimer = null;
+function scheduleFavoritesReload() {
+    clearTimeout(favoritesReloadTimer);
+    favoritesReloadTimer = setTimeout(() => loadFavorites(), 100);
 }
 
 // Update time display
@@ -416,9 +401,8 @@ function createFavoriteItem(bookmark) {
 
     item.appendChild(icon);
     item.appendChild(title);
-    setupFavoriteTile(item, bookmark);
 
-    return item;
+    return setupFavoriteTile(item, bookmark);
 }
 
 // Create folder item element
@@ -444,9 +428,8 @@ function createFolderItem(folder) {
 
     item.appendChild(icon);
     item.appendChild(title);
-    setupFavoriteTile(item, folder);
 
-    return item;
+    return setupFavoriteTile(item, folder);
 }
 
 // Chrome's top-level folders (Bookmarks bar, Other, Mobile) and policy-managed
@@ -455,20 +438,24 @@ function isEditableNode(node) {
     return node.parentId !== '0' && !node.unmodifiable;
 }
 
-// Edit button and drag and drop for a favorites tile
-function setupFavoriteTile(element, node) {
+// Wraps a favorites tile with its edit button and drag and drop; returns the wrapper
+function setupFavoriteTile(tile, node) {
+    const cell = createTileCell(tile);
+
     if (isEditableNode(node)) {
-        element.appendChild(createEditButton(`Edit ${node.title || 'folder'}`, () => openEditBookmarkModal(node)));
-        enableDrag(element, { kind: 'favorite', node });
+        cell.appendChild(createEditButton(`Edit ${node.title || 'folder'}`, () => openEditBookmarkModal(node)));
+        enableDrag(cell, { kind: 'favorite', node });
     }
 
-    enableDrop(element, event => favoriteDropPosition(event, element, node), (source, position) => {
+    enableDrop(cell, event => favoriteDropPosition(event, cell, node), (source, position) => {
         // index is a position among the target's current siblings; Chrome adjusts
         // for the moved node's own removal when it stays in the same folder
         moveBookmark(source.node, position === 'into'
             ? { parentId: node.id }
             : { parentId: node.parentId, index: node.index + (position === 'after' ? 1 : 0) });
     });
+
+    return cell;
 }
 
 // Dropping on a folder's middle moves into it; a tile's left or right edge reorders
@@ -490,7 +477,6 @@ async function moveBookmark(node, destination) {
         console.error('Error moving bookmark:', error);
         showToast(`Couldn't move "${node.title}": ${error.message}`);
     }
-    await loadFavorites();
 }
 
 // Get favicon URL for a bookmark
@@ -614,7 +600,16 @@ function makeActivatable(element, role) {
     });
 }
 
-// Pencil button shown on a tile's hover/focus; doesn't trigger the tile itself
+// A tile plus room for its edit button. The button sits next to the tile, not inside it:
+// assistive tech treats the contents of a role="button" tile as plain text, which would hide it.
+function createTileCell(tile) {
+    const cell = document.createElement('div');
+    cell.className = 'tile-cell';
+    cell.appendChild(tile);
+    return cell;
+}
+
+// Pencil button shown when its tile cell is hovered or focused
 function createEditButton(label, onClick) {
     const button = document.createElement('button');
     button.className = 'tile-edit-btn';
@@ -625,10 +620,7 @@ function createEditButton(label, onClick) {
             <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
         </svg>
     `;
-    button.addEventListener('click', event => {
-        event.stopPropagation();
-        onClick();
-    });
+    button.addEventListener('click', onClick);
     return button;
 }
 
@@ -655,12 +647,11 @@ function enableDrop(element, getPosition, onDrop) {
         if (!position) return;
         event.preventDefault(); // Allows the drop
         event.dataTransfer.dropEffect = 'move';
-        clearDropIndicators();
-        element.classList.add(`drop-${position}`);
+        showDropIndicator(element, `drop-${position}`);
     });
     element.addEventListener('dragleave', event => {
-        if (!element.contains(event.relatedTarget)) {
-            element.classList.remove('drop-before', 'drop-after', 'drop-into');
+        if (dropIndicator?.element === element && !element.contains(event.relatedTarget)) {
+            clearDropIndicators();
         }
     });
     element.addEventListener('drop', event => {
@@ -673,9 +664,17 @@ function enableDrop(element, getPosition, onDrop) {
     });
 }
 
+// dragover fires continuously, so only touch the DOM when the highlight actually changes
+function showDropIndicator(element, className) {
+    if (dropIndicator?.element === element && dropIndicator.className === className) return;
+    clearDropIndicators();
+    element.classList.add(className);
+    dropIndicator = { element, className };
+}
+
 function clearDropIndicators() {
-    document.querySelectorAll('.drop-before, .drop-after, .drop-into')
-        .forEach(element => element.classList.remove('drop-before', 'drop-after', 'drop-into'));
+    if (dropIndicator) dropIndicator.element.classList.remove(dropIndicator.className);
+    dropIndicator = null;
 }
 
 // Horizontal pointer position over an element: 0 at its left edge, 1 at its right
@@ -1346,14 +1345,6 @@ function renderCustomButtons() {
         buttonElement.addEventListener('click', () => executeCustomButtonAction(button));
         makeActivatable(buttonElement, 'button');
         
-        // Drag onto another shortcut's left or right half to reorder
-        enableDrag(buttonElement, { kind: 'shortcut', button });
-        enableDrop(buttonElement,
-            event => (dragSource.kind === 'shortcut' && dragSource.button !== button
-                ? (pointerFraction(event, buttonElement) < 0.5 ? 'before' : 'after')
-                : null),
-            (source, position) => moveCustomButton(source.button, button, position));
-
         const iconDiv = document.createElement('div');
         iconDiv.className = 'custom-button-icon';
         iconDiv.textContent = button.icon;
@@ -1362,11 +1353,21 @@ function renderCustomButtons() {
         nameDiv.className = 'custom-button-name';
         nameDiv.textContent = button.name;
         
-        buttonElement.appendChild(createEditButton(`Edit ${button.name}`, () => openCustomButtonModal(button)));
         buttonElement.appendChild(iconDiv);
         buttonElement.appendChild(nameDiv);
-        
-        container.appendChild(buttonElement);
+
+        const cell = createTileCell(buttonElement);
+        cell.appendChild(createEditButton(`Edit ${button.name}`, () => openCustomButtonModal(button)));
+
+        // Drag onto another shortcut's left or right half to reorder
+        enableDrag(cell, { kind: 'shortcut', button });
+        enableDrop(cell,
+            event => (dragSource.kind === 'shortcut' && dragSource.button.id !== button.id
+                ? (pointerFraction(event, cell) < 0.5 ? 'before' : 'after')
+                : null),
+            (source, position) => moveCustomButton(source.button, button, position));
+
+        container.appendChild(cell);
     });
 }
 
@@ -1415,9 +1416,13 @@ async function deleteCustomButton() {
     });
 }
 
+// Looked up by id: another tab's save can replace customButtons while a drag is in progress
 async function moveCustomButton(moved, target, position) {
-    customButtons.splice(customButtons.indexOf(moved), 1);
-    customButtons.splice(customButtons.indexOf(target) + (position === 'after' ? 1 : 0), 0, moved);
+    const indexOf = id => customButtons.findIndex(button => button.id === id);
+    if (indexOf(moved.id) === -1 || indexOf(target.id) === -1) return;
+
+    const [removed] = customButtons.splice(indexOf(moved.id), 1);
+    customButtons.splice(indexOf(target.id) + (position === 'after' ? 1 : 0), 0, removed);
     await saveCustomButtonsToStorage();
     renderCustomButtons();
 }
@@ -1628,18 +1633,24 @@ async function saveEditBookmark() {
 
     try {
         await chrome.bookmarks.update(node.id, changes);
-        // Moved folders go to the end of the new folder
-        if (folderSelect.value && folderSelect.value !== node.parentId) {
-            await chrome.bookmarks.move(node.id, { parentId: folderSelect.value });
-        }
     } catch (error) {
         console.error('Error saving bookmark:', error);
         showFormError('editBookmarkModal', `Couldn't save: ${error.message}`);
         return;
     }
 
+    // Moved items go to the end of the new folder
+    if (folderSelect.value && folderSelect.value !== node.parentId) {
+        try {
+            await chrome.bookmarks.move(node.id, { parentId: folderSelect.value });
+        } catch (error) {
+            console.error('Error moving bookmark:', error);
+            showFormError('editBookmarkModal', `Saved your changes, but couldn't move it: ${error.message}`);
+            return;
+        }
+    }
+
     closeEditBookmarkModal();
-    await loadFavorites();
 }
 
 // Counts every bookmark and folder inside a folder, at any depth
@@ -1668,17 +1679,16 @@ async function deleteEditingBookmark() {
 
             const { parentId, index, title, url } = node;
             showToast(`Deleted "${title}"`, async () => {
-                await chrome.bookmarks.create({ parentId, index, title, ...(url && { url }) });
-                await loadFavorites();
+                const bookmark = { parentId, title, ...(url && { url }) };
+                // The folder may have shrunk since; then put it back at the end
+                await chrome.bookmarks.create({ ...bookmark, index })
+                    .catch(() => chrome.bookmarks.create(bookmark));
             });
         }
     } catch (error) {
         console.error('Error deleting bookmark:', error);
         showFormError('editBookmarkModal', `Couldn't delete: ${error.message}`);
-        return;
     }
-
-    await loadFavorites();
 }
 
 async function saveFavorite() {
