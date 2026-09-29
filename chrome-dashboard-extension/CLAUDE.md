@@ -36,6 +36,9 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
    - `buildAllBookmarksNode()` mirrors Chrome's side panel: Bookmarks bar as a folder, "Other bookmarks" contents inline, Mobile bookmarks only if non-empty
    - Back from a top-level folder returns to All bookmarks; "New folder" there creates it in Other bookmarks
    - Can add new favorites via modal that creates bookmarks in bookmarks bar
+   - Pencil on a tile opens `editBookmarkModal`: rename, change URL, move (Folder select), delete. Top-level folders and managed bookmarks aren't editable (`isEditableNode()`)
+   - Drag and drop: a tile's left/right edge reorders, the middle of a folder moves into it, the Back button moves up a level. Indices passed to `chrome.bookmarks.move` are positions among the target's current siblings; Chrome adjusts for same-folder moves
+   - Deleting a bookmark or empty folder shows an Undo toast; a folder with contents asks `confirm()` first (Chrome has no bookmark trash)
 
 2. **Chrome Controls** - Quick access buttons with expandable sections
    - Bookmarks: Tree view with search, lazy-loaded on first expand
@@ -45,6 +48,7 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
 3. **Custom Buttons** - User-defined actions stored in `chrome.storage.local`
    - Action types: `url`, `chrome`, `search`, `bookmark`
    - Persistent across sessions
+   - Pencil opens the same modal in edit mode (`openCustomButtonModal(button)`), with Delete + Undo toast; drag to reorder
 
 4. **Custom Search Bar** - Main search input at top
    - Opens `<configured Jira URL>/browse/ZMOB-<query>`
@@ -105,7 +109,7 @@ if (chrome.readingList && chrome.readingList.query) {
 ### Modal Interactions
 
 - Click outside modal to close
-- Modals: `addFavoriteModal`, `customButtonModal`, `createFolderModal`, `jiraSettingsModal`
+- Modals: `addFavoriteModal`, `customButtonModal`, `createFolderModal`, `editBookmarkModal`, `jiraSettingsModal`
 - Forms validate input before saving
 
 ## Common Modifications
@@ -134,6 +138,8 @@ All colors, radii, fonts and z-index values are tokens in the `:root` block at t
 - Clickable tiles built in JS (`div`s): call `makeActivatable(element, role)` so they work from the keyboard
 - Modals: Escape closes the open modal, Enter in a field clicks its `.btn-primary`
 - Loading placeholders use `.skeleton`; empty/status messages use `.loading`
+- Tile edit buttons: `createEditButton(label, onClick)`; drag and drop: `enableDrag()` / `enableDrop()`
+- Transient messages (with optional Undo): `showToast(message, undo)`
 
 ### Adding New Chrome Controls
 
