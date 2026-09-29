@@ -40,12 +40,16 @@ This is a Chrome browser extension (Manifest V3) that replaces the default new t
    - `buildAllBookmarksNode()` mirrors Chrome's side panel: Bookmarks bar as a folder, "Other bookmarks" contents inline, Mobile bookmarks only if non-empty
    - Back from a top-level folder returns to All bookmarks; "New folder" there creates it in Other bookmarks
    - Can add new favorites via modal that creates bookmarks in bookmarks bar
+   - Pencil on a tile opens `editBookmarkModal`: rename, change URL, move (Folder select), delete. Top-level folders and managed bookmarks aren't editable (`isEditableNode()`)
+   - Drag and drop: a tile's left/right edge reorders, the middle of a folder moves into it, the Back button moves up a level. Indices passed to `chrome.bookmarks.move` are positions among the target's current siblings; Chrome adjusts for same-folder moves
+   - Deleting a bookmark or empty folder shows an Undo toast; a folder with contents asks `confirm()` first (Chrome has no bookmark trash)
 
 2. **Jira** - Issues for the selected view, with status changes and "updated" dots (see Jira Configuration)
 
 3. **Custom Buttons** - User-defined actions stored in `chrome.storage.local`
    - Action types: `url`, `chrome`, `search`, `bookmark`
    - Persistent across sessions
+   - Pencil opens the same modal in edit mode (`openCustomButtonModal(button)`), with Delete + Undo toast; drag to reorder
 
 4. **Search palette** - Main search input at top; `/` focuses it from anywhere on the page
    - `buildSearchResults()` order: ticket key (`parseTicketKey`: bare number → `JIRA_DEFAULT_PROJECT`, or any `ABC-123`), URL (`toUrl`), open tabs, loaded Jira issues, bookmarks, shortcuts, Google search
@@ -105,7 +109,7 @@ After making code changes:
 ### Modal Interactions
 
 - Click outside modal to close
-- Modals: `addFavoriteModal`, `customButtonModal`, `createFolderModal`, `jiraSettingsModal`
+- Modals: `addFavoriteModal`, `customButtonModal`, `createFolderModal`, `editBookmarkModal`, `jiraSettingsModal`
 - Forms validate input before saving
 
 ## Common Modifications
@@ -128,6 +132,9 @@ All colors, radii, fonts and z-index values are tokens in the `:root` block at t
 - Modals: Escape closes the open modal, Enter in a field clicks its `.btn-primary`
 - Loading placeholders use `.skeleton`; empty/status messages use `.loading`
 - Small favicon rows (search results, recently closed) use `.row-icon` + `setRowIcon(icon, url)`
+- Tile edit buttons: wrap the tile with `createTileCell(tile)` and append `createEditButton(label, onClick)` to the cell, never inside the tile (a `role="button"` tile hides its children from assistive tech); drag and drop (`enableDrag()` / `enableDrop()`) goes on the cell
+- Favorites reload from `chrome.bookmarks` change events and shortcuts from `chrome.storage.onChanged`, so changes from other tabs show up; bookmark edits don't need their own reload
+- Transient messages (with optional Undo): `showToast(message, undo)`
 
 ### Previewing without loading the extension
 
